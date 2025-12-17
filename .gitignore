@@ -178,3 +178,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Checkpoint files
+*.ckpt
+ckpt/
+# image files
+*.png
+*.jpg
+*.jpeg
+# inference results
+output/
+test/

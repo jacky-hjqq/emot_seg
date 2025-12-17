@@ -1,0 +1,26 @@
+trainer:
+  max_epochs: 12
+model:
+  class_path: training.mask_classification_panoptic.MaskClassificationPanoptic
+  init_args:
+    train_vis_interval: 20
+    val_vis_interval: 20
+    mask_thresh: 0.1
+    attn_mask_annealing_enabled: False
+    attn_mask_annealing_start_steps: [14782, 29564, 44346, 59128]
+    attn_mask_annealing_end_steps: [29564, 44346, 59128, 73910]
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 200
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            img_size: [480, 640]
+        cond_encoder:
+          class_path: models.vit.ViT
+          init_args:
+            img_size: [224, 224]
+data:
+  class_path: datasets.OC_dataset.OC_dataset
+  

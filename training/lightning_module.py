@@ -9,32 +9,22 @@
 # ---------------------------------------------------------------
 
 import math
-from typing import Optional, cast
+from typing import Optional
 import lightning
-from lightning.fabric.utilities import rank_zero_info
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torchmetrics.classification import MulticlassJaccardIndex
-from torchmetrics.detection import PanopticQuality, MeanAveragePrecision
-from torchmetrics.functional.detection._panoptic_quality_common import (
-    _prepocess_inputs,
-    _Color,
-    _get_color_areas,
-    _calculate_iou,
-)
 import wandb
 from PIL import Image
-import matplotlib.colors as mcolors
-from matplotlib.lines import Line2D
-import io
-import matplotlib.pyplot as plt
 import numpy as np
 from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
+import torch.nn.functional as F
 
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
+
+from datasets.utils.vis_utils import visualize_targets_and_templates, visualize_image_mask_and_templates
 
 bold_green = "\033[1;32m"
 reset = "\033[0m"
@@ -45,7 +35,6 @@ class LightningModule(lightning.LightningModule):
         self,
         network: nn.Module,
         img_size: tuple[int, int],
-        num_classes: int,
         attn_mask_annealing_enabled: bool,
         attn_mask_annealing_start_steps: Optional[list[int]],
         attn_mask_annealing_end_steps: Optional[list[int]],
@@ -59,12 +48,13 @@ class LightningModule(lightning.LightningModule):
         ckpt_path=None,
         delta_weights=False,
         load_ckpt_class_head=True,
+        train_vis_interval: Optional[int] = None,
+        val_vis_interval: Optional[int] = None,
     ):
         super().__init__()
 
         self.network = network
         self.img_size = img_size
-        self.num_classes = num_classes
         self.attn_mask_annealing_enabled = attn_mask_annealing_enabled
         self.attn_mask_annealing_start_steps = attn_mask_annealing_start_steps
         self.attn_mask_annealing_end_steps = attn_mask_annealing_end_steps
@@ -75,6 +65,8 @@ class LightningModule(lightning.LightningModule):
         self.poly_power = poly_power
         self.warmup_steps = warmup_steps
         self.llrd_l2_enabled = llrd_l2_enabled
+        self.train_vis_interval = train_vis_interval
+        self.val_vis_interval = val_vis_interval
 
         self.strict_loading = False
 
@@ -168,15 +160,17 @@ class LightningModule(lightning.LightningModule):
             },
         }
 
-    def forward(self, imgs):
-        x = imgs / 255.0
+    def forward(self, imgs, list_cond_imgs, list_cond_masks):
+        imgs = imgs / 255.0
+        for i in range(len(list_cond_imgs)):
+            list_cond_imgs[i] = list_cond_imgs[i] / 255.0
 
-        return self.network(x)
+        return self.network(imgs, list_cond_imgs, list_cond_masks)
 
     def training_step(self, batch, batch_idx):
-        imgs, targets = batch
+        imgs, list_targets, list_cond_imgs, list_cond_masks = batch
 
-        mask_logits_per_block, class_logits_per_block = self(imgs)
+        mask_logits_per_block, class_logits_per_block = self(imgs, list_cond_imgs, list_cond_masks)
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits) in enumerate(
@@ -185,11 +179,53 @@ class LightningModule(lightning.LightningModule):
             losses = self.criterion(
                 masks_queries_logits=mask_logits,
                 class_queries_logits=class_logits,
-                targets=targets,
+                targets=list_targets,
             )
             block_postfix = self.block_postfix(i)
             losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
             losses_all_blocks |= losses
+        
+        # Visualization every N steps 
+        if (
+            hasattr(self, 'train_vis_interval')
+            and self.train_vis_interval is not None
+            and self.train_vis_interval > 0
+            and (self.global_step % self.train_vis_interval == 0)
+        ):
+            img_sizes = [img.shape[-2:] for img in imgs]
+            # use the last block for visualization and only visualize the first batch item
+            # scale up to original image size
+            vis_mask_logits = F.interpolate(mask_logits_per_block[-1], self.img_size, mode="bilinear")
+            vis_mask_logits = self.revert_resize_and_pad_logits_instance_panoptic(
+                vis_mask_logits, img_sizes
+            )
+            for b in range(len(imgs)):
+                pred = self.to_per_pixel_preds_instance(
+                    vis_mask_logits[b],
+                    class_logits_per_block[-1][b],
+                    self.mask_thresh,
+                    self.overlap_thresh,
+                )
+                semantic_mask, instance_mask = pred[..., 0], pred[..., 1]
+
+                pred_vis = visualize_image_mask_and_templates(
+                    img=imgs[b], 
+                    mask=semantic_mask,
+                    cond_imgs=list_cond_imgs[b]
+                )
+                gt_vis = visualize_targets_and_templates(
+                    img=imgs[b], 
+                    targets=list_targets[b],
+                    cond_imgs=list_cond_imgs[b]
+                )
+                break
+
+            # Log pred_vis and gt_vis to wandb
+            if self.trainer.logger is not None:
+                self.trainer.logger.experiment.log({
+                    "train/pred": wandb.Image(pred_vis),
+                    "train/gt": wandb.Image(gt_vis)
+                })
 
         return self.criterion.loss_total(losses_all_blocks, self.log)
 
@@ -230,372 +266,14 @@ class LightningModule(lightning.LightningModule):
                     on_step=True,
                 )
 
-    def init_metrics_semantic(self, ignore_idx, num_blocks):
-        self.metrics = nn.ModuleList(
-            [
-                MulticlassJaccardIndex(
-                    num_classes=self.num_classes,
-                    validate_args=False,
-                    ignore_index=ignore_idx,
-                    average=None,
-                )
-                for _ in range(num_blocks)
-            ]
-        )
-
-    def init_metrics_instance(self, num_blocks):
-        self.metrics = nn.ModuleList(
-            [MeanAveragePrecision(iou_type="segm") for _ in range(num_blocks)]
-        )
-
-    def init_metrics_panoptic(self, thing_classes, stuff_classes, num_blocks):
-        self.metrics = nn.ModuleList(
-            [
-                PanopticQuality(
-                    thing_classes,
-                    stuff_classes + [self.num_classes],
-                    return_sq_and_rq=True,
-                    return_per_class=True,
-                )
-                for _ in range(num_blocks)
-            ]
-        )
-
-    @torch.compiler.disable
-    def update_metrics_semantic(
-        self,
-        preds: list[torch.Tensor],
-        targets: list[torch.Tensor],
-        block_idx,
-    ):
-        for i in range(len(preds)):
-            self.metrics[block_idx].update(preds[i][None, ...], targets[i][None, ...])
-
-    @torch.compiler.disable
-    def update_metrics_instance(
-        self,
-        preds: list[dict],
-        targets: list[dict],
-        block_idx,
-    ):
-        self.metrics[block_idx].update(preds, targets)
-
-    @torch.compiler.disable
-    def update_metrics_panoptic(
-        self,
-        preds: list[torch.Tensor],
-        targets: list[torch.Tensor],
-        is_crowds: list[torch.Tensor],
-        block_idx,
-    ):
-        for i in range(len(preds)):
-            metric = self.metrics[block_idx]
-            flatten_pred = _prepocess_inputs(
-                metric.things,
-                metric.stuffs,
-                preds[i][None, ...],
-                metric.void_color,
-                metric.allow_unknown_preds_category,
-            )[0]
-            flatten_target = _prepocess_inputs(
-                metric.things,
-                metric.stuffs,
-                targets[i][None, ...],
-                metric.void_color,
-                True,
-            )[0]
-
-            pred_areas = cast(
-                dict[_Color, torch.Tensor], _get_color_areas(flatten_pred)
-            )
-            target_areas = cast(
-                dict[_Color, torch.Tensor], _get_color_areas(flatten_target)
-            )
-            intersection_matrix = torch.transpose(
-                torch.stack((flatten_pred, flatten_target), -1), -1, -2
-            )
-            intersection_areas = cast(
-                dict[tuple[_Color, _Color], torch.Tensor],
-                _get_color_areas(intersection_matrix),
-            )
-
-            pred_segment_matched = set()
-            target_segment_matched = set()
-            for pred_color, target_color in intersection_areas:
-                if is_crowds[i][target_color[1]]:
-                    continue
-                if target_color == metric.void_color:
-                    continue
-                if pred_color[0] != target_color[0]:
-                    continue
-                iou = _calculate_iou(
-                    pred_color,
-                    target_color,
-                    pred_areas,
-                    target_areas,
-                    intersection_areas,
-                    metric.void_color,
-                )
-                continuous_id = metric.cat_id_to_continuous_id[target_color[0]]
-                if iou > 0.5:
-                    pred_segment_matched.add(pred_color)
-                    target_segment_matched.add(target_color)
-                    metric.iou_sum[continuous_id] += iou
-                    metric.true_positives[continuous_id] += 1
-
-            false_negative_colors = set(target_areas) - target_segment_matched
-            false_positive_colors = set(pred_areas) - pred_segment_matched
-
-            false_negative_colors.discard(metric.void_color)
-            false_positive_colors.discard(metric.void_color)
-
-            for target_color in list(false_negative_colors):
-                void_target_area = intersection_areas.get(
-                    (metric.void_color, target_color), 0
-                )
-                if void_target_area / target_areas[target_color] > 0.5:
-                    false_negative_colors.discard(target_color)
-
-            crowd_by_cat_id = {}
-            for false_negative_color in false_negative_colors:
-                if is_crowds[i][false_negative_color[1]]:
-                    crowd_by_cat_id[false_negative_color[0]] = false_negative_color[1]
-                    continue
-
-                continuous_id = metric.cat_id_to_continuous_id[false_negative_color[0]]
-                metric.false_negatives[continuous_id] += 1
-
-            for pred_color in list(false_positive_colors):
-                pred_void_crowd_area = intersection_areas.get(
-                    (pred_color, metric.void_color), 0
-                )
-
-                if pred_color[0] in crowd_by_cat_id:
-                    crowd_color = (pred_color[0], crowd_by_cat_id[pred_color[0]])
-                    pred_void_crowd_area += intersection_areas.get(
-                        (pred_color, crowd_color), 0
-                    )
-
-                if pred_void_crowd_area / pred_areas[pred_color] > 0.5:
-                    false_positive_colors.discard(pred_color)
-
-            for false_positive_color in false_positive_colors:
-                continuous_id = metric.cat_id_to_continuous_id[false_positive_color[0]]
-                metric.false_positives[continuous_id] += 1
-
     def block_postfix(self, block_idx):
         if not self.network.masked_attn_enabled:
             return ""
         return (
-            f"_block_{-len(self.metrics) + block_idx + 1}"
+            f"_block_{-5 + block_idx + 1}" # 5 means number of layers with masked attn
             if block_idx != self.network.num_blocks
             else ""
         )
-
-    def _on_eval_epoch_end_semantic(self, log_prefix, log_per_class=False):
-        for i, metric in enumerate(self.metrics):  # type: ignore
-            iou_per_class = metric.compute()
-            metric.reset()
-
-            block_postfix = self.block_postfix(i)
-            if log_per_class:
-                for class_idx, iou in enumerate(iou_per_class):
-                    self.log(
-                        f"metrics/{log_prefix}_iou_class_{class_idx}{block_postfix}",
-                        iou,
-                    )
-
-            iou_all = float(iou_per_class.mean())
-            self.log(
-                f"metrics/{log_prefix}_iou_all{block_postfix}",
-                iou_all,
-            )
-
-    def _on_eval_epoch_end_instance(self, log_prefix):
-        for i, metric in enumerate(self.metrics):  # type: ignore
-            results = metric.compute()
-            metric.reset()
-
-            block_postfix = self.block_postfix(i)
-            self.log(
-                f"metrics/{log_prefix}_ap_all{block_postfix}",
-                results["map"],
-            )
-            self.log(
-                f"metrics/{log_prefix}_ap_small_all{block_postfix}",
-                results["map_small"],
-            )
-            self.log(
-                f"metrics/{log_prefix}_ap_medium_all{block_postfix}",
-                results["map_medium"],
-            )
-            self.log(
-                f"metrics/{log_prefix}_ap_large_all{block_postfix}",
-                results["map_large"],
-            )
-            self.log(
-                f"metrics/{log_prefix}_ap_50_all{block_postfix}",
-                results["map_50"],
-            )
-            self.log(
-                f"metrics/{log_prefix}_ap_75_all{block_postfix}",
-                results["map_75"],
-            )
-
-    def _on_eval_epoch_end_panoptic(self, log_prefix, log_per_class=False):
-        for i, metric in enumerate(self.metrics):  # type: ignore
-            result = metric.compute()[:-1]
-            metric.reset()
-
-            pq, sq, rq = result[:, 0], result[:, 1], result[:, 2]
-
-            block_postfix = self.block_postfix(i)
-            if log_per_class:
-                for class_idx in range(len(pq)):
-                    self.log(
-                        f"metrics/{log_prefix}_pq_class_{class_idx}{block_postfix}",
-                        pq[class_idx],
-                    )
-                    self.log(
-                        f"metrics/{log_prefix}_sq_class_{class_idx}{block_postfix}",
-                        sq[class_idx],
-                    )
-                    self.log(
-                        f"metrics/{log_prefix}_rq_class_{class_idx}{block_postfix}",
-                        rq[class_idx],
-                    )
-
-            self.log(
-                f"metrics/{log_prefix}_pq_all{block_postfix}",
-                pq.mean(),
-            )
-            self.log(f"metrics/{log_prefix}_sq_all{block_postfix}", sq.mean())
-            self.log(f"metrics/{log_prefix}_rq_all{block_postfix}", rq.mean())
-
-            num_things = len(metric.things)
-            pq_things, sq_things, rq_things = (
-                result[:num_things, 0],
-                result[:num_things, 1],
-                result[:num_things, 2],
-            )
-            pq_stuff, sq_stuff, rq_stuff = (
-                result[num_things:, 0],
-                result[num_things:, 1],
-                result[num_things:, 2],
-            )
-
-            self.log(
-                f"metrics/{log_prefix}_pq_things{block_postfix}",
-                pq_things.mean(),
-            )
-            self.log(
-                f"metrics/{log_prefix}_sq_things{block_postfix}",
-                sq_things.mean(),
-            )
-            self.log(
-                f"metrics/{log_prefix}_rq_things{block_postfix}",
-                rq_things.mean(),
-            )
-            self.log(
-                f"metrics/{log_prefix}_pq_stuff{block_postfix}",
-                pq_stuff.mean(),
-            )
-            self.log(
-                f"metrics/{log_prefix}_sq_stuff{block_postfix}",
-                sq_stuff.mean(),
-            )
-            self.log(
-                f"metrics/{log_prefix}_rq_stuff{block_postfix}",
-                rq_stuff.mean(),
-            )
-
-    def _on_eval_end_semantic(self, log_prefix):
-        if not self.trainer.sanity_checking:
-            rank_zero_info(
-                f"{bold_green}mIoU: {self.trainer.callback_metrics[f'metrics/{log_prefix}_iou_all'] * 100:.1f}{reset}"
-            )
-
-    def _on_eval_end_instance(self, log_prefix):
-        if not self.trainer.sanity_checking:
-            rank_zero_info(
-                f"{bold_green}mAP All: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_all'] * 100:.1f} | "
-                f"mAP Small: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_small_all'] * 100:.1f} | "
-                f"mAP Medium: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_medium_all'] * 100:.1f} | "
-                f"mAP Large: {self.trainer.callback_metrics[f'metrics/{log_prefix}_ap_large_all'] * 100:.1f}{reset}"
-            )
-
-    def _on_eval_end_panoptic(self, log_prefix):
-        if not self.trainer.sanity_checking:
-            rank_zero_info(
-                f"{bold_green}PQ All: {self.trainer.callback_metrics[f'metrics/{log_prefix}_pq_all'] * 100:.1f} | "
-                f"PQ Things: {self.trainer.callback_metrics[f'metrics/{log_prefix}_pq_things'] * 100:.1f} | "
-                f"PQ Stuff: {self.trainer.callback_metrics[f'metrics/{log_prefix}_pq_stuff'] * 100:.1f}{reset}"
-            )
-
-    @torch.compiler.disable
-    def plot_semantic(
-        self,
-        img,
-        target,
-        logits,
-        log_prefix,
-        block_idx,
-        batch_idx,
-        cmap="tab20",
-    ):
-        fig, axes = plt.subplots(1, 3, figsize=[15, 5], sharex=True, sharey=True)
-
-        axes[0].imshow(img.cpu().numpy().transpose(1, 2, 0))
-        axes[0].axis("off")
-
-        target = target.cpu().numpy()
-        unique_classes = np.unique(target)
-
-        preds = torch.argmax(logits, dim=0).cpu().numpy()
-        unique_classes = np.unique(np.concatenate((unique_classes, np.unique(preds))))
-
-        num_classes = len(unique_classes)
-        colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))  # type: ignore
-
-        if self.ignore_idx in unique_classes:
-            colors[unique_classes == self.ignore_idx] = [0, 0, 0, 1]  # type: ignore
-
-        custom_cmap = mcolors.ListedColormap(colors)  # type: ignore
-        norm = mcolors.Normalize(0, num_classes - 1)
-
-        axes[1].imshow(
-            np.digitize(target, unique_classes) - 1,
-            cmap=custom_cmap,
-            norm=norm,
-            interpolation="nearest",
-        )
-        axes[1].axis("off")
-
-        if preds is not None:
-            axes[2].imshow(
-                np.digitize(preds, unique_classes, right=True),
-                cmap=custom_cmap,
-                norm=norm,
-                interpolation="nearest",
-            )
-            axes[2].axis("off")
-
-        patches = [
-            Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
-            for i in range(num_classes)
-        ]
-
-        fig.legend(handles=patches, loc="upper left")
-
-        buf = io.BytesIO()
-        plt.tight_layout()
-        plt.savefig(buf, facecolor="black")
-        plt.close(fig)
-        buf.seek(0)
-
-        block_postfix = self.block_postfix(block_idx)
-        name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
 
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
@@ -743,99 +421,95 @@ class LightningModule(lightning.LightningModule):
             logits.append(logits_i)
 
         return logits
-
-    def to_per_pixel_preds_panoptic(
-        self, mask_logits_list, class_logits, stuff_classes, mask_thresh, overlap_thresh
+    
+    @torch.compiler.disable
+    def to_per_pixel_preds_instance(
+        self, mask_logits, class_logits, mask_thresh, overlap_thresh
     ):
+        """
+        Post-processing for dynamic/conditional instance segmentation.
+        Class IDs correspond to the indices of condition images.
+        
+        Args:
+            mask_logits: Shape (Q, H, W) - Mask predictions for a single sample.
+            class_logits: Shape (Q, Num_Cond_Imgs + 1). 
+                          Assumes the LAST class index is "No Object" (background).
+            mask_thresh: Score threshold.
+            overlap_thresh: Occlusion pruning threshold.
+
+        Returns:
+            preds: Shape (H, W, 2). 
+                   Layer 0: Condition Image Index (Class ID). -1 means Background.
+                   Layer 1: Instance ID. -1 means Background.
+        """
+        # 1. Get scores and classes
+        # Dynamic: The number of classes depends on the input shape
         scores, classes = class_logits.softmax(dim=-1).max(-1)
-        preds_list = []
+        
+        # Dynamically determine the "No Object" class index
+        # Usually the last dimension of logits contains the N classes + 1 void class
+        no_object_idx = class_logits.shape[-1] - 1
+        
+        # Initialize the output map: (H, W, 2)
+        # Fill with -1. This effectively sets Background = -1
+        preds = -torch.ones(
+            (*mask_logits.shape[-2:], 2),
+            dtype=torch.long,
+            device=class_logits.device,
+        )
 
-        for i in range(len(mask_logits_list)):
-            preds = -torch.ones(
-                (*mask_logits_list[i].shape[-2:], 2),
-                dtype=torch.long,
-                device=class_logits.device,
-            )
-            preds[:, :, 0] = self.num_classes
+        # 2. Filtering
+        # Keep if class is NOT "No Object" AND score > threshold
+        keep = classes.ne(no_object_idx) & (scores > mask_thresh)
+        
+        if not keep.any():
+            return preds
 
-            keep = classes[i].ne(class_logits.shape[-1] - 1) & (scores[i] > mask_thresh)
-            if not keep.any():
-                preds_list.append(preds)
+        # 3. Pixel-wise Competition
+        masks = mask_logits.sigmoid()
+        mask_ids = (scores[keep][..., None, None] * masks[keep]).argmax(0)
+        
+        segments = -torch.ones(
+            *masks.shape[-2:],
+            dtype=torch.long,
+            device=class_logits.device,
+        )
+
+        segment_id = 0
+        segment_and_class_ids = []
+
+        for k, class_id in enumerate(classes[keep].tolist()):
+            orig_mask = masks[keep][k] >= 0.5
+            new_mask = mask_ids == k
+            final_mask = orig_mask & new_mask
+
+            orig_area = orig_mask.sum().item()
+            new_area = new_mask.sum().item()
+            final_area = final_mask.sum().item()
+
+            if (
+                orig_area == 0
+                or new_area == 0
+                or final_area == 0
+                or new_area / orig_area < overlap_thresh
+            ):
                 continue
 
-            masks = mask_logits_list[i].sigmoid()
-            segments = -torch.ones(
-                *masks.shape[-2:],
-                dtype=torch.long,
-                device=class_logits.device,
-            )
+            segments[final_mask] = segment_id
+            segment_and_class_ids.append((segment_id, class_id))
+            
+            segment_id += 1
 
-            mask_ids = (scores[i][keep][..., None, None] * masks[keep]).argmax(0)
-            stuff_segment_ids, segment_id = {}, 0
-            segment_and_class_ids = []
+        # 4. Final Map Construction
+        for seg_id, cls_id in segment_and_class_ids:
+            segment_mask = segments == seg_id
+            
+            # Assign the Condition Image Index as the Class ID
+            preds[:, :, 0] = torch.where(segment_mask, cls_id, preds[:, :, 0])
+            # Assign the unique Instance ID
+            preds[:, :, 1] = torch.where(segment_mask, seg_id, preds[:, :, 1])
 
-            for k, class_id in enumerate(classes[i][keep].tolist()):
-                orig_mask = masks[keep][k] >= 0.5
-                new_mask = mask_ids == k
-                final_mask = orig_mask & new_mask
-
-                orig_area = orig_mask.sum().item()
-                new_area = new_mask.sum().item()
-                final_area = final_mask.sum().item()
-                if (
-                    orig_area == 0
-                    or new_area == 0
-                    or final_area == 0
-                    or new_area / orig_area < overlap_thresh
-                ):
-                    continue
-
-                if class_id in stuff_classes:
-                    if class_id in stuff_segment_ids:
-                        segments[final_mask] = stuff_segment_ids[class_id]
-                        continue
-                    else:
-                        stuff_segment_ids[class_id] = segment_id
-
-                segments[final_mask] = segment_id
-                segment_and_class_ids.append((segment_id, class_id))
-
-                segment_id += 1
-
-            for segment_id, class_id in segment_and_class_ids:
-                segment_mask = segments == segment_id
-                preds[:, :, 0] = torch.where(segment_mask, class_id, preds[:, :, 0])
-                preds[:, :, 1] = torch.where(segment_mask, segment_id, preds[:, :, 1])
-
-            preds_list.append(preds)
-
-        return preds_list
-
-    @staticmethod
-    @torch.compiler.disable
-    def to_per_pixel_targets_panoptic(targets: list[dict]):
-        per_pixel_targets = []
-        for target in targets:
-            per_pixel_target = -torch.ones(
-                (*target["masks"].shape[-2:], 2),
-                dtype=target["labels"].dtype,
-                device=target["labels"].device,
-            )
-
-            for i, mask in enumerate(target["masks"]):
-                per_pixel_target[:, :, 0] = torch.where(
-                    mask, target["labels"][i], per_pixel_target[:, :, 0]
-                )
-
-                per_pixel_target[:, :, 1] = torch.where(
-                    mask,
-                    torch.tensor(i, device=target["masks"].device),
-                    per_pixel_target[:, :, 1],
-                )
-
-            per_pixel_targets.append(per_pixel_target)
-
-        return per_pixel_targets
+        return preds
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["state_dict"] = {

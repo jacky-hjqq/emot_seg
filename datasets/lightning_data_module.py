@@ -16,7 +16,6 @@ class LightningDataModule(lightning.LightningDataModule):
         batch_size: int,
         num_workers: int,
         img_size: tuple[int, int],
-        num_classes: int,
         check_empty_targets: bool,
         ignore_idx: Optional[int] = None,
         pin_memory: bool = True,
@@ -28,7 +27,6 @@ class LightningDataModule(lightning.LightningDataModule):
         self.check_empty_targets = check_empty_targets
         self.ignore_idx = ignore_idx
         self.img_size = img_size
-        self.num_classes = num_classes
 
         self.dataloader_kwargs = {
             "persistent_workers": False if num_workers == 0 else persistent_workers,
@@ -39,14 +37,32 @@ class LightningDataModule(lightning.LightningDataModule):
 
     @staticmethod
     def train_collate(batch):
-        imgs, targets = [], []
+        imgs, list_targets, list_cond_imgs, list_cond_masks = [], [], [], []
 
-        for img, target in batch:
+        for data in batch:
+            img = data["img"] # (3,h,w)
+            targets = data["targets"] 
+            cond_imgs = data["cond_imgs"] # (n,3,h_c,w_c)
+            cond_masks = data["cond_masks"] # (n,h_c,w_c)
             imgs.append(img)
-            targets.append(target)
+            list_targets.append(targets)
+            list_cond_imgs.append(cond_imgs)
+            list_cond_masks.append(cond_masks)
 
-        return torch.stack(imgs), targets
+        return torch.stack(imgs), list_targets, list_cond_imgs, list_cond_masks
 
     @staticmethod
     def eval_collate(batch):
-        return tuple(zip(*batch))
+        imgs, list_targets, list_cond_imgs, list_cond_masks = [], [], [], []
+
+        for data in batch:
+            img = data["img"] # (3,h,w)
+            targets = data["targets"]
+            cond_imgs = data["cond_imgs"] 
+            cond_masks = data["cond_masks"]
+            imgs.append(img)
+            list_targets.append(targets)
+            list_cond_imgs.append(cond_imgs)
+            list_cond_masks.append(cond_masks)
+
+        return torch.stack(imgs), list_targets, list_cond_imgs, list_cond_masks

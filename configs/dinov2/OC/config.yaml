@@ -1,0 +1,23 @@
+# dataset
+Omni6dDataset:
+    data_root: '/media/tum/data2/Omni6DPose/SOPE'
+    model_meta_root: '/media/tum/data2/Omni6DPose/Meta'
+    condition_size: 224  
+YCBVDataset:
+    data_root: '/media/tum/data1/datasets/bop-dataset/ycbv/test'
+    render_template_root: '/media/tum/data1/Omni6DPose/ycbv_templates'
+    condition_size: 224  
+# train augmentations
+augs:
+    random_crop: True
+    random_crop_ratio: 0.5
+    random_crop_scale: [0.33, 1.0]
+    cojitter: True
+    cojitter_ratio: 0.5
+    color_jitter:
+        brightness: 0.3
+        contrast: 0.3
+        saturation: 0.3
+        p: 0.9
+    gray_scale: True
+    gau_blur: False

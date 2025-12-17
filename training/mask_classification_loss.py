@@ -17,6 +17,7 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
 )
+import torch.nn.functional as F
 
 
 class MaskClassificationLoss(Mask2FormerLoss):
@@ -28,7 +29,6 @@ class MaskClassificationLoss(Mask2FormerLoss):
         mask_coefficient: float,
         dice_coefficient: float,
         class_coefficient: float,
-        num_labels: int,
         no_object_coefficient: float,
     ):
         nn.Module.__init__(self)
@@ -38,11 +38,10 @@ class MaskClassificationLoss(Mask2FormerLoss):
         self.mask_coefficient = mask_coefficient
         self.dice_coefficient = dice_coefficient
         self.class_coefficient = class_coefficient
-        self.num_labels = num_labels
         self.eos_coef = no_object_coefficient
-        empty_weight = torch.ones(self.num_labels + 1)
-        empty_weight[-1] = self.eos_coef
-        self.register_buffer("empty_weight", empty_weight)
+        # empty_weight = torch.ones(self.num_labels + 1)
+        # empty_weight[-1] = self.eos_coef
+        # self.register_buffer("empty_weight", empty_weight)
 
         self.matcher = Mask2FormerHungarianMatcher(
             num_points=num_points,
@@ -96,10 +95,10 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         return loss_masks
 
-    def loss_total(self, losses_all_layers, log_fn) -> torch.Tensor:
+    def loss_total(self, losses_all_layers, log_fn, prefix="train") -> torch.Tensor:
         loss_total = None
         for loss_key, loss in losses_all_layers.items():
-            log_fn(f"losses/train_{loss_key}", loss, sync_dist=True)
+            log_fn(f"losses/{prefix}_{loss_key}", loss, sync_dist=True)
 
             if "mask" in loss_key:
                 weighted_loss = loss * self.mask_coefficient
@@ -115,6 +114,67 @@ class MaskClassificationLoss(Mask2FormerLoss):
             else:
                 loss_total = torch.add(loss_total, weighted_loss)
 
-        log_fn("losses/train_loss_total", loss_total, sync_dist=True, prog_bar=True)
+        log_fn(f"losses/{prefix}_loss_total", loss_total, sync_dist=True, prog_bar=True)
 
         return loss_total  # type: ignore
+    
+    def loss_labels(self, class_queries_logits, class_labels, indices):
+        """
+        Compute the cross-entropy loss for labels.
+        Modified to handle a variable number of classes per sample (List input).
+
+        Args:
+            class_queries_logits (`list[torch.Tensor]`):
+                A list of length batch_size. Each element is a tensor of shape 
+                `(num_queries, num_classes_i + 1)`.
+            class_labels (`list[torch.Tensor]`):
+                List of ground truth class labels.
+            indices (`list[tuple[np.array, np.array]]`):
+                List of tuples (src_idx, tgt_idx) computed by the Hungarian matcher.
+
+        Returns:
+            `dict[str, Tensor]`: A dict containing the cross entropy loss.
+        """
+        losses = []
+        # Iterate over each sample in the batch individually
+        for sample_i, (logits, targets, (src_idx, tgt_idx)) in enumerate(
+            zip(class_queries_logits, class_labels, indices)
+        ):
+            # logits shape: (num_queries, num_classes_sample_i + 1)
+            # The +1 accounts for the "No Object" class
+            
+            num_queries = logits.shape[0]
+            num_classes_total = logits.shape[1] 
+            
+            # 1. Determine the background class index (last index)
+            bg_idx = num_classes_total - 1
+            
+            # 2. Build Target Tensor
+            # Initialize all targets as background first
+            target_classes = torch.full(
+                (num_queries,), 
+                fill_value=bg_idx, 
+                dtype=torch.int64, 
+                device=logits.device
+            )
+            
+            # Assign ground truth labels to the matched queries
+            # src_idx: Indices of the predicted queries
+            # tgt_idx: Indices of the corresponding ground truth labels
+            target_classes[src_idx] = targets[tgt_idx]
+            
+            # 3. Dynamic Weight Tensor
+            # Since the number of classes varies per sample, we construct the weight tensor dynamically.
+            # Foreground weights = 1.0, Background weight = eos_weight
+            weights = torch.ones(num_classes_total, device=logits.device)
+            weights[-1] = self.eos_coef
+
+            # 4. Compute Cross Entropy Loss for the current sample
+            loss_sample = F.cross_entropy(logits, target_classes, weight=weights)
+            losses.append(loss_sample)
+
+        # 5. Aggregate losses (Stack and Mean over the batch)
+        final_loss = torch.stack(losses).mean()
+        losses = {"loss_cross_entropy": final_loss}
+
+        return losses

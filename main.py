@@ -15,15 +15,19 @@ import torch
 import warnings
 from lightning.pytorch import cli
 from lightning.pytorch.callbacks import ModelSummary, LearningRateMonitor
+from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
 from lightning.pytorch.loops.fetchers import _DataFetcher, _DataLoaderIterDataFetcher
 
 from training.lightning_module import LightningModule
 from datasets.lightning_data_module import LightningDataModule
+import sys
 
-# Suppress PyTorch FX warnings for DINOv3 models
-import os
-os.environ["TORCH_LOGS"] = "-dynamo"
+# # Suppress PyTorch FX warnings for DINOv3 models
+# import os
+# os.environ["TORCH_LOGS"] = "-dynamo"
+import matplotlib
+matplotlib.use('Agg')
 
 
 _orig_single = _t.raise_unexpected_value
@@ -113,18 +117,6 @@ class LightningCLI(cli.LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--compile_disabled", action="store_true")
 
-        parser.link_arguments(
-            "data.init_args.num_classes", "model.init_args.num_classes"
-        )
-        parser.link_arguments(
-            "data.init_args.num_classes",
-            "model.init_args.network.init_args.num_classes",
-        )
-
-        parser.link_arguments(
-            "data.init_args.stuff_classes", "model.init_args.stuff_classes"
-        )
-
         parser.link_arguments("data.init_args.img_size", "model.init_args.img_size")
         parser.link_arguments(
             "data.init_args.img_size", "model.init_args.network.init_args.img_size"
@@ -140,7 +132,7 @@ class LightningCLI(cli.LightningCLI):
         )
 
     def fit(self, model, **kwargs):
-        if hasattr(self.trainer.logger.experiment, "log_code"):
+        if self.trainer.logger is not None and hasattr(self.trainer.logger.experiment, "log_code"):
             is_gitignored = parse_gitignore(".gitignore")
             include_fn = lambda path: path.endswith(".py") or path.endswith(".yaml")
             self.trainer.logger.experiment.log_code(
@@ -151,8 +143,13 @@ class LightningCLI(cli.LightningCLI):
             _should_check_val_fx, self.trainer.fit_loop.epoch_loop
         )
 
-        if not self.config[self.config["subcommand"]]["compile_disabled"]:
-            model = torch.compile(model)
+        # if not self.config[self.config["subcommand"]]["compile_disabled"]:
+        #     is_debugging = 'debugpy' in sys.modules
+        #     if not is_debugging:
+        #         print("Compiling model with torch.compile...")
+        #         model = torch.compile(model)
+        #     else:
+        #         print("Debug mode detected: Skipping torch.compile")
 
         self.trainer.fit(model, **kwargs)
 
@@ -168,11 +165,18 @@ def cli_main():
         trainer_defaults={
             "precision": "16-mixed",
             "enable_model_summary": False,
+            "strategy": "ddp_find_unused_parameters_true",
+            "logger": {
+                "class_path": "lightning.pytorch.loggers.WandbLogger",
+                "init_args": {
+                    "project": "eomt_seg",
+                    "save_dir": ".",
+                },
+            },
             "callbacks": [
                 ModelSummary(max_depth=3),
-                LearningRateMonitor(logging_interval="epoch"),
+                # LearningRateMonitor(logging_interval="epoch"),
             ],
-            "devices": 1,
             "gradient_clip_val": 0.01,
             "gradient_clip_algorithm": "norm",
         },
