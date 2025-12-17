@@ -160,17 +160,16 @@ class LightningModule(lightning.LightningModule):
             },
         }
 
-    def forward(self, imgs, list_cond_imgs, list_cond_masks):
+    def forward(self, imgs, bs_cond_imgs, bs_cond_masks):
         imgs = imgs / 255.0
-        for i in range(len(list_cond_imgs)):
-            list_cond_imgs[i] = list_cond_imgs[i] / 255.0
+        bs_cond_imgs = bs_cond_imgs / 255.0
 
-        return self.network(imgs, list_cond_imgs, list_cond_masks)
+        return self.network(imgs, bs_cond_imgs, bs_cond_masks)
 
     def training_step(self, batch, batch_idx):
-        imgs, list_targets, list_cond_imgs, list_cond_masks = batch
+        imgs, list_targets, bs_cond_imgs, bs_cond_masks = batch
 
-        mask_logits_per_block, class_logits_per_block = self(imgs, list_cond_imgs, list_cond_masks)
+        mask_logits_per_block, class_logits_per_block = self(imgs, bs_cond_imgs, bs_cond_masks)
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits) in enumerate(
@@ -211,12 +210,12 @@ class LightningModule(lightning.LightningModule):
                 pred_vis = visualize_image_mask_and_templates(
                     img=imgs[b], 
                     mask=semantic_mask,
-                    cond_imgs=list_cond_imgs[b]
+                    cond_imgs=bs_cond_imgs[b]
                 )
                 gt_vis = visualize_targets_and_templates(
                     img=imgs[b], 
                     targets=list_targets[b],
-                    cond_imgs=list_cond_imgs[b]
+                    cond_imgs=bs_cond_imgs[b]
                 )
                 break
 

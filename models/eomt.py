@@ -100,7 +100,7 @@ class EoMT(nn.Module):
             device=class_logits.device
         )
         class_logits = torch.cat([class_logits, no_object_logits], dim=-1)
-        class_logits = class_logits.squeeze(0) # remove the bs dim
+        # Keep batch dimension; callers may unbind() if they need a list per sample.
 
         x = x[:, self.num_q + self.encoder.backbone.num_prefix_tokens :, :]
         x = x.transpose(1, 2).reshape(
@@ -192,17 +192,25 @@ class EoMT(nn.Module):
         )
         return attn_mask
 
-    def forward(self, x: torch.Tensor, list_cond_x: torch.Tensor = None, list_cond_masks: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, bs_cond_x: torch.Tensor = None, bs_cond_masks: torch.Tensor = None):
         # Extract condition features from all layers for each sample in the batch
-        if list_cond_x is not None:
-            batch_size = x.shape[0]
-            list_cond_feats = []
-            for b in range(batch_size):
-                cond_x = (list_cond_x[b] - self.cond_encoder.pixel_mean) / self.cond_encoder.pixel_std
-                cond_mask = list_cond_masks[b] if list_cond_masks is not None else None
-                cond_layer_feats = self.encode_cond_x_multilayer(cond_x, cond_mask)
-                # List of 5 tensors: (num_cond_b, embed_dim) where num_cond_b varies per batch
-                list_cond_feats.append(cond_layer_feats) 
+        if bs_cond_x is not None:
+            # NOTE: the dataloader stacks `bs_cond_x`/`bs_cond_masks`, so num_cond is fixed within batch.
+            # Vectorize cond encoding by flattening (B, N, ...) -> (B*N, ...).
+            batch_size, num_cond = bs_cond_x.shape[:2]
+            cond_x = (bs_cond_x - self.cond_encoder.pixel_mean) / self.cond_encoder.pixel_std
+
+            cond_x = cond_x.reshape(batch_size * num_cond, *cond_x.shape[2:])
+            cond_masks = None
+            if bs_cond_masks is not None:
+                cond_masks = bs_cond_masks.reshape(batch_size * num_cond, *bs_cond_masks.shape[2:])
+
+            cond_feats_per_layer_flat = self.encode_cond_x_multilayer(cond_x, cond_masks)
+            # List[T]: each (B*N, D) -> (B, N, D)
+            cond_feats_per_layer = [
+                feats.reshape(batch_size, num_cond, feats.shape[-1])
+                for feats in cond_feats_per_layer_flat
+            ]
         else:
             raise ValueError("cond_x is required for open-vocabulary mode")
 
@@ -231,23 +239,13 @@ class EoMT(nn.Module):
                 self.masked_attn_enabled
                 and i >= len(self.encoder.backbone.blocks) - self.num_blocks
             ):
-                # Process each sample in the batch separately due to varying num_cond
-                batch_mask_logits = []
-                batch_class_logits = []
-                
-                for b in range(batch_size):
-                    x_b = x[b:b+1]  # (1, num_tokens, embed_dim)
-                    cond_feats_b = list_cond_feats[b][layer_idx]  # (num_cond_b, embed_dim)
-                    
-                    mask_logits_b, class_logits_b = self._predict(
-                        self.encoder.backbone.norm(x_b),
-                        cond_feats_b.unsqueeze(0)  # (1, num_cond_b, embed_dim)
-                    )
-                    batch_mask_logits.append(mask_logits_b)
-                    batch_class_logits.append(class_logits_b)
-                
-                mask_logits = torch.cat(batch_mask_logits, dim=0)
-                class_logits = batch_class_logits  # Keep as list due to varying num_cond
+                cond_feats = cond_feats_per_layer[layer_idx]  # (B, N, D)
+                mask_logits, class_logits = self._predict(
+                    self.encoder.backbone.norm(x),
+                    cond_feats,
+                )
+                # Keep existing API expected by the loss: list length B, each (Q, N+1)
+                class_logits = list(class_logits.unbind(0))
                 
                 mask_logits_per_layer.append(mask_logits)
                 class_logits_per_layer.append(class_logits)
@@ -272,22 +270,12 @@ class EoMT(nn.Module):
                 x = x + block.layer_scale2(mlp_out)
 
         # Final prediction with final layer's cond features
-        batch_mask_logits = []
-        batch_class_logits = []
-        
-        for b in range(batch_size):
-            x_b = x[b:b+1]  # (1, num_tokens, embed_dim)
-            cond_feats_b = list_cond_feats[b][layer_idx]  # (num_cond_b, embed_dim)
-            
-            mask_logits_b, class_logits_b = self._predict(
-                self.encoder.backbone.norm(x_b),
-                cond_feats_b.unsqueeze(0)  # (1, num_cond_b, embed_dim)
-            )
-            batch_mask_logits.append(mask_logits_b)
-            batch_class_logits.append(class_logits_b)
-        
-        mask_logits = torch.cat(batch_mask_logits, dim=0)
-        class_logits = batch_class_logits  # Keep as list due to varying num_cond
+        cond_feats = cond_feats_per_layer[layer_idx]  # (B, N, D)
+        mask_logits, class_logits = self._predict(
+            self.encoder.backbone.norm(x),
+            cond_feats,
+        )
+        class_logits = list(class_logits.unbind(0))
         
         mask_logits_per_layer.append(mask_logits)
         class_logits_per_layer.append(class_logits)

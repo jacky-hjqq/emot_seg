@@ -37,7 +37,7 @@ class LightningDataModule(lightning.LightningDataModule):
 
     @staticmethod
     def train_collate(batch):
-        imgs, list_targets, list_cond_imgs, list_cond_masks = [], [], [], []
+        imgs, list_targets, bs_cond_imgs, bs_cond_masks = [], [], [], []
 
         for data in batch:
             img = data["img"] # (3,h,w)
@@ -46,14 +46,14 @@ class LightningDataModule(lightning.LightningDataModule):
             cond_masks = data["cond_masks"] # (n,h_c,w_c)
             imgs.append(img)
             list_targets.append(targets)
-            list_cond_imgs.append(cond_imgs)
-            list_cond_masks.append(cond_masks)
+            bs_cond_imgs.append(cond_imgs)
+            bs_cond_masks.append(cond_masks)
 
-        return torch.stack(imgs), list_targets, list_cond_imgs, list_cond_masks
+        return torch.stack(imgs), list_targets, torch.stack(bs_cond_imgs), torch.stack(bs_cond_masks)
 
     @staticmethod
     def eval_collate(batch):
-        imgs, list_targets, list_cond_imgs, list_cond_masks = [], [], [], []
+        imgs, list_targets, bs_cond_imgs, bs_cond_masks = [], [], [], []
 
         for data in batch:
             img = data["img"] # (3,h,w)
@@ -62,7 +62,7 @@ class LightningDataModule(lightning.LightningDataModule):
             cond_masks = data["cond_masks"]
             imgs.append(img)
             list_targets.append(targets)
-            list_cond_imgs.append(cond_imgs)
-            list_cond_masks.append(cond_masks)
+            bs_cond_imgs.append(cond_imgs)
+            bs_cond_masks.append(cond_masks)
 
-        return torch.stack(imgs), list_targets, list_cond_imgs, list_cond_masks
+        return torch.stack(imgs), list_targets, torch.stack(bs_cond_imgs), torch.stack(bs_cond_masks)

@@ -86,10 +86,10 @@ class MaskClassificationPanoptic(LightningModule):
         batch_idx=None,
         log_prefix=None,
     ):
-        imgs, list_targets, list_cond_imgs, list_cond_masks = batch
+        imgs, list_targets, bs_cond_imgs, bs_cond_masks = batch
         img_sizes = [img.shape[-2:] for img in imgs]
         transformed_imgs = self.resize_and_pad_imgs_instance_panoptic(imgs)
-        mask_logits_per_layer, class_logits_per_layer = self(transformed_imgs, list_cond_imgs, list_cond_masks)
+        mask_logits_per_layer, class_logits_per_layer = self(transformed_imgs, bs_cond_imgs, bs_cond_masks)
 
         val_losses_all_blocks = {}
         for i, (mask_logits, class_logits) in enumerate(
@@ -146,12 +146,12 @@ class MaskClassificationPanoptic(LightningModule):
                 pred_vis = visualize_image_mask_and_templates(
                     img=imgs[b], 
                     mask=semantic_mask,
-                    cond_imgs=list_cond_imgs[b]
+                    cond_imgs=bs_cond_imgs[b]
                 )
                 gt_vis = visualize_targets_and_templates(
                     img=imgs[b], 
                     targets=list_targets[b],
-                    cond_imgs=list_cond_imgs[b]
+                    cond_imgs=bs_cond_imgs[b]
                 )
                 break
 

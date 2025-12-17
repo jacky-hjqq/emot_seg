@@ -54,7 +54,7 @@
                 "--trainer.devices", "1", 
                 "--trainer.accumulate_grad_batches", "8",
                 // "--trainer.num_sanity_val_steps", "0",
-                "--trainer.logger", "false",
+                // "--trainer.logger", "false",
                 "--data.batch_size", "2",
                 "--data.path", "OC"
             ],
