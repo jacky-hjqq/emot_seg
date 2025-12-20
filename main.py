@@ -184,4 +184,6 @@ def cli_main():
 
 
 if __name__ == "__main__":
+    import os
+    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
     cli_main()

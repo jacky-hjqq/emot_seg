@@ -37,7 +37,7 @@ class MaskClassificationPanoptic(LightningModule):
         mask_coefficient: float = 5.0,
         dice_coefficient: float = 5.0,
         class_coefficient: float = 2.0,
-        mask_thresh: float = 0.8,
+        mask_thresh: float = 0.5,
         overlap_thresh: float = 0.8,
         train_vis_interval: Optional[int] = None,
         val_vis_interval: Optional[int] = None,

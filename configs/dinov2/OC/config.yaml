@@ -2,6 +2,7 @@
 Omni6dDataset:
     data_root: '/media/tum/data2/Omni6DPose/SOPE'
     model_meta_root: '/media/tum/data2/Omni6DPose/Meta'
+    cond_root: 'prepared_cond'
     condition_size: 224  
 YCBVDataset:
     data_root: '/media/tum/data1/datasets/bop-dataset/ycbv/test'

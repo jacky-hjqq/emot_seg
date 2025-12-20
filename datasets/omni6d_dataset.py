@@ -7,7 +7,6 @@ import torch
 import numpy as np
 import cv2
 from PIL import Image
-from imageio import imread
 from collections import defaultdict
 from torchvision import transforms
 import sys
@@ -24,6 +23,7 @@ class Omni6DSegmentation(data.Dataset):
     def __init__(self, Omni6dDataset, augs=None, scene_name=None):
         self.data_root = Omni6dDataset['data_root']
         self.model_meta_root = Omni6dDataset['model_meta_root']
+        self.cond_root = Omni6dDataset['cond_root']
         self.condition_size = Omni6dDataset.get('condition_size', 224)
         self.split = "train"
 
@@ -79,6 +79,9 @@ class Omni6DSegmentation(data.Dataset):
                         instance_info = []
                         for obj_key in meta_data['objects']:
                             obj_meta_data = meta_data['objects'][obj_key]
+                            # skip if it's transparent or specular 
+                            if 'transparent' in obj_meta_data["material"] or 'specular' in obj_meta_data["material"]:
+                                continue
                             obj_id = obj_meta_data['meta']['oid']
                             inst_id = int(obj_key.split('_', 1)[0])
                             obj_label = obj_meta_data['meta']['class_name']
@@ -116,7 +119,8 @@ class Omni6DSegmentation(data.Dataset):
                             "mask_path": paths["mask"],
                             "instance_info": instance_info, 
                             })
-            break
+                        
+            # break
 
         self.len_train = len(self.total_data)                 
         logging.info(f"Omni6D Data size: {self.len_train}")
@@ -132,7 +136,11 @@ class Omni6DSegmentation(data.Dataset):
 
         # load image and mask
         img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
-        mask = (imread(mask_path)[:, :, 0] * 255).astype(np.uint8)
+        mask = (cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)[:, :, 2] * 255).astype(np.uint8)
+
+        # Keep a copy of the full instance mask before we mask-out unconditioned objects.
+        # This will be used to supervise mask proposals for *all* annotated objects.
+        mask_all = mask.copy()
 
         # # random crop the image and mask (augmentation)
         # if self.random_crop and random.random() < self.random_crop_ratio:
@@ -176,26 +184,16 @@ class Omni6DSegmentation(data.Dataset):
                 continue
             mask_id = inst['inst_id']
             obj_id = inst['obj_id']
-            # random sample one from the self.annotation[obj_label_id]
-            while True:
-                cond_idx = random.choice(self.annotation_objects[obj_id])
-                cond_data = self.total_inst[cond_idx['data_idx']]
-                cond_img, cond_mask = self.get_cond_data(cond_data)
-                if cond_img is not None:
-                    break
+            cond_img, cond_mask = self.get_cond_data(obj_id)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_mask_ids.append(mask_id)
         # load condition images for the non-im objects
         for obj_label_id in labels_id_non_im:
-            # random sample one from the self.annotation[obj_label_id]
-            while True:
-                cond_idx = random.choice(self.annotation_labels[obj_label_id])
-                cond_data = self.total_inst[cond_idx['data_idx']]
-                cond_img, cond_mask = self.get_cond_data(cond_data)
-                if cond_img is not None:
-                    break
-
+            cond_idx = random.choice(self.annotation_labels[obj_label_id])
+            cond_data = self.total_inst[cond_idx['data_idx']]
+            obj_id = cond_data['obj_name']
+            cond_img, cond_mask = self.get_cond_data(obj_id)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_mask_ids.append(0)  # non-im object mask id = 0
@@ -221,14 +219,15 @@ class Omni6DSegmentation(data.Dataset):
         valid_mask_ids = cond_mask_ids[cond_mask_ids > 0].numpy()
         valid_mask = np.isin(mask, valid_mask_ids)
         mask = mask * valid_mask
-
         # shift mask ids to match the augmentation transform (which does -1 shift)
         cond_mask_ids -= 1 # shift with -1
 
         # transform (image augmentation and mask transform)
         img = Image.fromarray(img)
         mask = Image.fromarray(mask)
-        img, mask = self._img_augmentation(img, mask)   
+        mask_all = Image.fromarray(mask_all)
+        img, mask, mask_all = self._img_augmentation(img, mask, mask_all) 
+
         # check if mask and cond_mask_ids match (only positive samples should be in mask)
         positive_cond_ids = cond_mask_ids[cond_mask_ids >= 0]
         assert set(torch.unique(mask).tolist()) == set(positive_cond_ids.tolist() + [-1]), f"Mask IDs and cond_mask_ids do not match! mask ids: {torch.unique(mask)}, positive cond_mask_ids: {positive_cond_ids.tolist()}"
@@ -245,14 +244,19 @@ class Omni6DSegmentation(data.Dataset):
                 )
                 # Negative templates (cond_mask_ids == -1) must not appear in semantic_mask.
                 assert torch.all(cond_mask_ids[unique_sem] >= 0), "semantic_mask points to negative-template indices"
-        # generate targets from semantic mask
+        # Targets for conditioned matching (class head supervision)
         targets = self.generate_targets(semantic_mask, bg_val=-1)
 
-        # Visualzation
-        vis = visualize_targets_and_templates(img, targets, cond_imgs)
-        # vis = visualize_image_mask_and_templates(img, semantic_mask, cond_imgs)
-        os.makedirs("test", exist_ok=True)
-        cv2.imwrite(f'test/vis_mask_{index}.png', vis[:,:,::-1])
+        # Targets for mask proposal supervision (all annotated objects)
+        # These labels are instance-ids (not condition indices) and are NOT used for class loss.
+        targets_all = self.generate_targets(mask_all, bg_val=-1)
+        targets["masks_all"] = targets_all["masks"]
+
+        # # Visualzation
+        # vis = visualize_targets_and_templates(img, targets, cond_imgs)
+        # # vis = visualize_image_mask_and_templates(img, semantic_mask, cond_imgs)
+        # os.makedirs("test", exist_ok=True)
+        # cv2.imwrite(f'test/vis_mask_{index}.png', vis[:,:,::-1])
 
         img = torch.from_numpy(np.array(img)).permute(2,0,1).to(torch.uint8) # (3, H, W)
         cond_imgs = cond_imgs.permute(0,3,1,2)  # (N, 3, H, W)
@@ -292,36 +296,54 @@ class Omni6DSegmentation(data.Dataset):
 
         return paths
     
-    def get_cond_data(self, cond_data):
-        image_path = cond_data['image_path']
-        cond_img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
-        mask_path = cond_data['mask_path']
-        cond_mask = (imread(mask_path)[:, :, 0] * 255).astype(np.uint8)
-        is_target = (cond_mask == cond_data['inst_id'])
-        if is_target.sum() < 100:
-            return None, None
-            
-        cond_mask = is_target.astype(np.uint8) * 255
-        # # cond_img augmentation
-        # cond_img, cond_mask = self._cond_img_augmentation(cond_img, cond_mask)
-        # resize and crop
-        cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0.2)
-        # mask the cond_img with the cond_mask (Black)
-        cond_img = cond_img * cond_mask[:, :, None].astype(bool)
+    def get_cond_data(self, obj_id):
+        """Load a condition image/mask pair for the given ``obj_id``.
 
-        return cond_img, cond_mask
+        - Prefer precomputed condition images under ``self.cond_root/<obj_id>/`` with files
+          named ``<stem>_image.png`` and ``<stem>_mask.png`` (randomly choose one).
+        - If no precomputed files are available, randomly sample one annotation instance from
+          ``self.annotation_objects[obj_id]`` and extract the instance mask from that frame.
+        Returns ``(cond_img, cond_mask)`` or ``(None, None)`` if no valid source exists.
+        """
+        obj_dir = os.path.join(self.cond_root, str(obj_id))
+        # find all candidate image files that follow the naming convention
+        img_files = [f for f in os.listdir(obj_dir) if f.endswith('_image.png')]
+        if len(img_files) > 0:
+            img_file = random.choice(img_files)
+            stem = img_file[:-len('_image.png')]
+            img_path = os.path.join(obj_dir, img_file)
+            mask_path = os.path.join(obj_dir, stem + '_mask.png')
+            if os.path.exists(img_path) and os.path.exists(mask_path):
+                cond_img = cv2.imread(img_path)[:, :, ::-1]
+                cond_mask_raw = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+                # support single-channel or multi-channel masks
+                if cond_mask_raw is not None:
+                    if cond_mask_raw.ndim == 3:
+                        cond_mask = cond_mask_raw[:, :, 0]
+                    else:
+                        cond_mask = cond_mask_raw
+                    # binarize: consider non-zero as foreground and accept as-is
+                    cond_mask = (cond_mask != 0).astype(np.uint8) * 255
+                    cond_img = cond_img * cond_mask[:, :, None].astype(bool)
+                    return cond_img, cond_mask
+        else:
+            print(f"No precomputed cond images for obj {obj_id}, sampling from dataset.")
+            return None, None
     
-    def _img_augmentation(self, img, mask):
+    def _img_augmentation(self, img, mask, mask_all):
+        # Kept for backward compatibility with older code paths.
+        # Prefer doing synchronized augmentation in __getitem__ when multiple masks are involved.
         # Random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+            mask_all = mask_all.transpose(Image.FLIP_LEFT_RIGHT)
         # Apply Color Augmentation (training mode only)
         if self.image_aug is not None:
             if self.cojitter and random.random() > self.cojitter_ratio:
                 img = self.image_aug(img)
 
-        return img, self._mask_transform(mask)
+        return img, self._mask_transform(mask), self._mask_transform(mask_all)
     
     def _cond_img_augmentation(self, img, mask):
         # random rotation

@@ -62,6 +62,7 @@ class YCBVSegmentation(data.Dataset):
         cond_imgs = []
         cond_masks = []
         cond_imgs_path = []
+        cond_obj_ids = []
         mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
         for inst_id, inst in enumerate(instance_info):
             obj_id = inst['obj_id']
@@ -74,10 +75,11 @@ class YCBVSegmentation(data.Dataset):
             cond_img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
             cond_mask = get_mask(cond_img)
             # resize and crop the condition image
-            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0.2)
+            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_imgs_path.append(image_path)
+            cond_obj_ids.append(obj_id)
 
         # load other negative condition images
         for obj_id in self.obj_ids:
@@ -88,10 +90,11 @@ class YCBVSegmentation(data.Dataset):
             cond_img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
             cond_mask = get_mask(cond_img)
             # resize and crop the condition image
-            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0.2)
+            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_imgs_path.append(image_path)
+            cond_obj_ids.append(obj_id)
 
         cond_imgs = np.stack(cond_imgs, axis=0)  # (N, H, W, 3)
         cond_masks = np.stack(cond_masks)
@@ -104,10 +107,16 @@ class YCBVSegmentation(data.Dataset):
         perm = torch.randperm(cond_imgs.shape[0])
         cond_imgs = cond_imgs[perm]
         cond_masks = cond_masks[perm]
+        cond_obj_ids = torch.tensor(cond_obj_ids)[perm]
         # remap the semantic_mask ids to cond_imgs indices
         semantic_mask = self.remap_mask(mask, perm)
-        # generate targets from semantic mask
+        # Conditioned targets (class head supervision)
         targets = self.generate_targets(semantic_mask, bg_val=-1)
+
+        # All-instance targets (mask proposal supervision). Here `mask` already contains
+        # the per-instance IDs for objects in the image (no negatives).
+        targets_all = self.generate_targets(mask, bg_val=-1)
+        targets["masks_all"] = targets_all["masks"]
 
         # # Visualzation
         # vis = visualize_targets_and_templates(img, targets, cond_imgs)
@@ -127,6 +136,7 @@ class YCBVSegmentation(data.Dataset):
             "semantic_mask": semantic_mask,
             "cond_imgs": cond_imgs, 
             "cond_masks": cond_masks,
+            "cond_obj_ids": cond_obj_ids
         }
         return batch_data
 

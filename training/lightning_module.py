@@ -423,7 +423,12 @@ class LightningModule(lightning.LightningModule):
     
     @torch.compiler.disable
     def to_per_pixel_preds_instance(
-        self, mask_logits, class_logits, mask_thresh, overlap_thresh
+        self,
+        mask_logits: torch.Tensor,
+        class_logits: torch.Tensor,
+        mask_thresh: float,
+        overlap_thresh: float,
+        return_scores: bool = False,
     ):
         """
         Post-processing for dynamic/conditional instance segmentation.
@@ -437,9 +442,15 @@ class LightningModule(lightning.LightningModule):
             overlap_thresh: Occlusion pruning threshold.
 
         Returns:
-            preds: Shape (H, W, 2). 
-                   Layer 0: Condition Image Index (Class ID). -1 means Background.
-                   Layer 1: Instance ID. -1 means Background.
+            If return_scores is False:
+                preds: Shape (H, W, 2).
+                    Layer 0: Condition Image Index (Class ID). -1 means Background.
+                    Layer 1: Instance ID. -1 means Background.
+
+            If return_scores is True:
+                (preds, instance_scores)
+                instance_scores: Shape (N,). Score per returned instance ID, where
+                    instance_scores[i] corresponds to instance_id == i in preds[..., 1].
         """
         # 1. Get scores and classes
         # Dynamic: The number of classes depends on the input shape
@@ -462,6 +473,11 @@ class LightningModule(lightning.LightningModule):
         keep = classes.ne(no_object_idx) & (scores > mask_thresh)
         
         if not keep.any():
+            if return_scores:
+                empty_scores = torch.empty(
+                    (0,), dtype=scores.dtype, device=class_logits.device
+                )
+                return preds, empty_scores
             return preds
 
         # 3. Pixel-wise Competition
@@ -476,6 +492,7 @@ class LightningModule(lightning.LightningModule):
 
         segment_id = 0
         segment_and_class_ids = []
+        instance_scores_list = []
 
         for k, class_id in enumerate(classes[keep].tolist()):
             orig_mask = masks[keep][k] >= 0.5
@@ -496,6 +513,7 @@ class LightningModule(lightning.LightningModule):
 
             segments[final_mask] = segment_id
             segment_and_class_ids.append((segment_id, class_id))
+            instance_scores_list.append(scores[keep][k])
             
             segment_id += 1
 
@@ -507,6 +525,15 @@ class LightningModule(lightning.LightningModule):
             preds[:, :, 0] = torch.where(segment_mask, cls_id, preds[:, :, 0])
             # Assign the unique Instance ID
             preds[:, :, 1] = torch.where(segment_mask, seg_id, preds[:, :, 1])
+
+        if return_scores:
+            if instance_scores_list:
+                instance_scores = torch.stack(instance_scores_list)
+            else:
+                instance_scores = torch.empty(
+                    (0,), dtype=scores.dtype, device=class_logits.device
+                )
+            return preds, instance_scores
 
         return preds
 

@@ -1,6 +1,6 @@
 trainer:
-  max_epochs: 12
-  limit_train_batches: 64000 # steps_per_epoch = limit_train_batches / accumulate_grad_batches 
+  max_epochs: 5
+  limit_train_batches: 32000 # steps_per_epoch = limit_train_batches / accumulate_grad_batches 
   # logger:
   #   class_path: lightning.pytorch.loggers.wandb.WandbLogger
   #   init_args:
@@ -11,8 +11,8 @@ model:
   class_path: training.mask_classification_panoptic.MaskClassificationPanoptic
   init_args:
     train_vis_interval: 50
-    val_vis_interval: 20
-    attn_mask_annealing_enabled: True
+    val_vis_interval: 10
+    attn_mask_annealing_enabled: False # True
     attn_mask_annealing_start_steps: [16000, 32000, 48000, 64000] # [2epochs, 4epochs, 6epochs, 8epochs]
     attn_mask_annealing_end_steps: [32000, 48000, 64000, 80000] # [4epochs, 6epochs, 8epochs, 10epochs]
     network:
