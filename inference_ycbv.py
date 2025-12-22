@@ -10,7 +10,7 @@ import numpy as np
 import torch.nn.functional as F
 from lightning import seed_everything
 from datasets.ycbv_dataset import YCBVSegmentation
-from datasets.utils.vis_utils import visualize_image_mask_and_templates
+from datasets.utils.vis_utils import visualize_image_mask_and_templates, visualize_instance_mask
 
 def mask_to_rle_fast(binary_mask: np.ndarray):
     """
@@ -46,7 +46,7 @@ dataset_name = "ycbv"
 seed_everything(0, verbose=False)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 img_size = (480, 640)
-state_dict_path = 'eomt_seg/l0buxklo/checkpoints/epoch=4-step=40000.ckpt'
+state_dict_path = '/media/tum/data2/epoch=9-step=80000.ckpt'
 config_path = "configs/dinov2/OC/inference.yaml" 
 with open(config_path, "r") as f:
     config = yaml.safe_load(f)
@@ -145,6 +145,14 @@ for idx in tqdm(range(len(dataset))):
         save_path = os.path.join(f"output/{dataset_name}_infer_vis", f"{idx:06d}_pred.png")
         os.makedirs(f"output/{dataset_name}_infer_vis", exist_ok=True)
         plt.imsave(save_path, pred_vis.astype(np.uint8))
+
+        pred_inst_vis = visualize_instance_mask(
+            img=imgs[0].cpu(),
+            instance_mask=instance_mask,
+        )
+        save_path = os.path.join(f"output/{dataset_name}_infer_inst_vis", f"{idx:06d}_pred.png")
+        os.makedirs(f"output/{dataset_name}_infer_inst_vis", exist_ok=True)
+        plt.imsave(save_path, pred_inst_vis.astype(np.uint8))
 
         # save the results
         num_instance_mask = int(pred_scores.numel())

@@ -540,3 +540,51 @@ def visualize_bbox(image, bbox, score, obj_id, color=(255, 0, 0), thickness=2, f
                 font_scale, (255, 255, 255), 1, lineType=cv2.LINE_AA)
 
     return img_copy
+
+def visualize_instance_mask(img, instance_mask):
+    """
+    Visualizes image and instance mask side-by-side using OpenCV.
+    
+    Args:
+        img (torch.Tensor): Shape (3, H, W). Assumes RGB.
+        instance_mask (torch.Tensor): Shape (H, W). -1 is background.
+        
+    Returns:
+        np.ndarray: The combined visualization (H, 2*W, 3) in BGR format (uint8).
+    """
+    # 1. Process Original Image
+    # Convert to numpy and transpose to (H, W, C)
+    img_np = img.cpu().detach().numpy().transpose(1, 2, 0)
+    
+    # Normalize to 0-255 uint8
+    if img_np.max() <= 1.0:
+        img_np = (img_np * 255).astype(np.uint8)
+    else:
+        img_np = img_np.astype(np.uint8)
+
+    # 2. Process Instance Mask
+    mask_np = instance_mask.cpu().detach().numpy()
+    H, W = mask_np.shape
+    
+    # Initialize empty BGR image (black background)
+    mask_colored = np.zeros((H, W, 3), dtype=np.uint8)
+    
+    unique_ids = np.unique(mask_np)
+    
+    for uid in unique_ids:
+        if uid == -1:
+            # Explicitly leave background black (already zeros)
+            continue
+        
+        # Generate random BGR color
+        # high=256 ensures vivid colors
+        color = np.random.randint(0, 256, size=3).tolist()
+        
+        # Assign color to the mask pixels
+        mask_colored[mask_np == uid] = color
+
+    # 3. Combine Side-by-Side
+    # Horizontal concatenation
+    vis_result = np.hstack((img_np, mask_colored))
+    
+    return vis_result

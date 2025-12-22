@@ -25,6 +25,7 @@ class Omni6DSegmentation(data.Dataset):
         self.model_meta_root = Omni6dDataset['model_meta_root']
         self.cond_root = Omni6dDataset['cond_root']
         self.condition_size = Omni6dDataset.get('condition_size', 224)
+        self.num_condition_imgs = 30
         self.split = "train"
 
         # --- Augmentation Settings ---
@@ -62,6 +63,7 @@ class Omni6DSegmentation(data.Dataset):
         self.annotation_objects = defaultdict(list)
         self.obj_label_ids = []
         data_patches = sorted(os.listdir(os.path.join(self.data_root)))
+        # data_patches = data_patches[:5]
         for data_patch in data_patches:
             data_patch_dir = os.path.join(self.data_root, data_patch)
             for scene_name in self.scene_name:
@@ -119,14 +121,52 @@ class Omni6DSegmentation(data.Dataset):
                             "mask_path": paths["mask"],
                             "instance_info": instance_info, 
                             })
-                        
-            # break
 
         self.len_train = len(self.total_data)                 
         logging.info(f"Omni6D Data size: {self.len_train}")
     
     def __len__(self):
         return self.len_train
+
+    def _collect_pos_conditions(self, instance_info, unique_inst_ids):
+        """Collect available per-instance condition images.
+
+        Returns a list of dicts with keys:
+            - 'inst_id', 'obj_id', 'obj_label_id', 'cond_img', 'cond_mask'
+        Only includes instances whose `cond_root/<obj_id>` directory exists and
+        where `get_cond_data` returned a valid pair.
+
+        Ensures at most one condition is returned per `obj_label_id`.
+        """
+        collected = []
+        seen_label_ids = set()
+        shuffled_instance_info = list(instance_info)
+        random.shuffle(shuffled_instance_info)
+        for inst in shuffled_instance_info:
+            if inst['inst_id'] not in unique_inst_ids:
+                continue
+
+            obj_label_id = inst['obj_label_id']
+            # if obj_label_id in seen_label_ids:
+            #     continue
+
+            obj_id = inst['obj_id']
+            obj_dir = os.path.join(self.cond_root, str(obj_id))
+            if not os.path.exists(obj_dir):
+                continue
+            cond_img, cond_mask = self.get_cond_data(obj_id)
+            if cond_img is None:
+                continue
+            collected.append({
+                'inst_id': inst['inst_id'],
+                'obj_id': obj_id,
+                'obj_label_id': obj_label_id,
+                'cond_img': cond_img,
+                'cond_mask': cond_mask,
+            })
+
+            seen_label_ids.add(obj_label_id)
+        return collected
 
     def __getitem__(self, index):
         load_data = self.total_data[index]
@@ -138,66 +178,58 @@ class Omni6DSegmentation(data.Dataset):
         img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
         mask = (cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)[:, :, 2] * 255).astype(np.uint8)
 
+        # random crop the image and mask (augmentation)
+        if self.random_crop and random.random() < self.random_crop_ratio:
+            crop_scale = random.uniform(self.random_crop_scale[0], self.random_crop_scale[1])
+            img, mask = random_scaled_crop(img, mask, crop_scale=crop_scale)
+        
         # Keep a copy of the full instance mask before we mask-out unconditioned objects.
         # This will be used to supervise mask proposals for *all* annotated objects.
         mask_all = mask.copy()
-
-        # # random crop the image and mask (augmentation)
-        # if self.random_crop and random.random() < self.random_crop_ratio:
-        #     crop_scale = random.uniform(self.random_crop_scale[0], self.random_crop_scale[1])
-        #     img, mask = random_scaled_crop(img, mask, crop_scale=crop_scale)
-            # # remove the small objects in the mask after crop
-            # unique_ids = np.unique(mask)
-            # for uid in unique_ids:
-            #     if uid == 0:
-            #         continue
-            #     obj_mask = (mask == uid).astype(np.uint8)
-            #     # remove the object if less than 1% of the image area
-            #     if np.sum(obj_mask) < (0.001 / crop_scale) * (img.shape[0] * img.shape[1]):
-            #         mask[mask == uid] = 0
-
-            # vis = visualize_cond_img(img, mask, img, mask)
-            # os.makedirs("test", exist_ok=True)
-            # cv2.imwrite(f"test/vis_{index}.png", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
         # remove the cropped out objects
         unique_ids = np.unique(np.array(mask))
         # Only keep instance IDs that are present in the mask (exclude background 0)
         unique_inst_ids = set(unique_ids[unique_ids > 0])
 
-        # load the condition images based on the labels
-        labels_id_im = [inst['obj_label_id'] for inst in instance_info if inst['inst_id'] in unique_inst_ids]
-        labels_id_non_im = list(set(self.obj_label_ids) - set(labels_id_im))
-        # random sample non-im objects
-        num_condition_imgs = 30
-        num_non_im = max(0, num_condition_imgs - len(labels_id_im))
-        num_non_im = min(num_non_im, len(labels_id_non_im))  # Can't sample more than available
-        labels_id_non_im = random.sample(labels_id_non_im, num_non_im) if num_non_im > 0 else []
-
+        # Collect available per-instance condition images first (skip missing cond dirs)
         cond_imgs = []
         cond_masks = []
         cond_mask_ids = []
-        # load condition images for the objects in the image
-        for inst in instance_info:
-            # Only load condition images for instances that exist in the current mask
-            if inst['inst_id'] not in unique_inst_ids:
-                continue
-            mask_id = inst['inst_id']
-            obj_id = inst['obj_id']
-            cond_img, cond_mask = self.get_cond_data(obj_id)
-            cond_imgs.append(cond_img)
-            cond_masks.append(cond_mask)
-            cond_mask_ids.append(mask_id)
-        # load condition images for the non-im objects
+
+        primary = self._collect_pos_conditions(instance_info, unique_inst_ids)
+        # add primary collected conditions
+        for p in primary:
+            cond_imgs.append(p['cond_img'])
+            cond_masks.append(p['cond_mask'])
+            cond_mask_ids.append(p['inst_id'])
+
+        # determine how many non-im (negative) conditions are still needed
+        num_primary = len(cond_imgs)
+        num_non_im_needed = max(0, self.num_condition_imgs - num_primary)
+
+        # choose candidate labels excluding those already represented by primary collected
+        labels_id_im = set(p['obj_label_id'] for p in primary)
+        candidate_labels = list(set(self.obj_label_ids) - labels_id_im)
+        random.shuffle(candidate_labels)
+        labels_id_non_im = candidate_labels[:num_non_im_needed] if num_non_im_needed > 0 else []
+
+        # sample one cond per selected label (best-effort with retries)
         for obj_label_id in labels_id_non_im:
-            cond_idx = random.choice(self.annotation_labels[obj_label_id])
-            cond_data = self.total_inst[cond_idx['data_idx']]
-            obj_id = cond_data['obj_name']
-            cond_img, cond_mask = self.get_cond_data(obj_id)
+            while True:
+                cond_idx = random.choice(self.annotation_labels[obj_label_id])
+                cond_data = self.total_inst[cond_idx['data_idx']]
+                obj_id = cond_data['obj_name']
+                obj_dir = os.path.join(self.cond_root, str(obj_id))
+                if not os.path.exists(obj_dir):
+                    continue
+                cond_img, cond_mask = self.get_cond_data(obj_id)
+                break
+
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_mask_ids.append(0)  # non-im object mask id = 0
-
+        
         cond_imgs = np.stack(cond_imgs, axis=0)  # (N, H, W, 3)
         cond_masks = np.stack(cond_masks)
         cond_imgs = torch.tensor(cond_imgs, dtype=torch.float32)  # (N, H, W, 3)
@@ -219,6 +251,7 @@ class Omni6DSegmentation(data.Dataset):
         valid_mask_ids = cond_mask_ids[cond_mask_ids > 0].numpy()
         valid_mask = np.isin(mask, valid_mask_ids)
         mask = mask * valid_mask
+
         # shift mask ids to match the augmentation transform (which does -1 shift)
         cond_mask_ids -= 1 # shift with -1
 
@@ -226,11 +259,15 @@ class Omni6DSegmentation(data.Dataset):
         img = Image.fromarray(img)
         mask = Image.fromarray(mask)
         mask_all = Image.fromarray(mask_all)
-        img, mask, mask_all = self._img_augmentation(img, mask, mask_all) 
+        img, mask, mask_all = self._img_augmentation(img, mask, mask_all)  
 
         # check if mask and cond_mask_ids match (only positive samples should be in mask)
         positive_cond_ids = cond_mask_ids[cond_mask_ids >= 0]
-        assert set(torch.unique(mask).tolist()) == set(positive_cond_ids.tolist() + [-1]), f"Mask IDs and cond_mask_ids do not match! mask ids: {torch.unique(mask)}, positive cond_mask_ids: {positive_cond_ids.tolist()}"
+        unique_mask = set(torch.unique(mask).tolist())
+        # remove background id (-1) from mask before comparing, if present
+        if -1 in unique_mask:
+            unique_mask.remove(-1)
+        assert unique_mask == set(positive_cond_ids.tolist()), f"Mask IDs and cond_mask_ids do not match! mask ids: {torch.unique(mask)}, positive cond_mask_ids: {positive_cond_ids.tolist()}"
         # remap the mask ids to cond_imgs indices
         semantic_mask = self.remap_mask(mask, cond_mask_ids)
 
@@ -244,7 +281,7 @@ class Omni6DSegmentation(data.Dataset):
                 )
                 # Negative templates (cond_mask_ids == -1) must not appear in semantic_mask.
                 assert torch.all(cond_mask_ids[unique_sem] >= 0), "semantic_mask points to negative-template indices"
-        # Targets for conditioned matching (class head supervision)
+        # generate targets from semantic mask
         targets = self.generate_targets(semantic_mask, bg_val=-1)
 
         # Targets for mask proposal supervision (all annotated objects)
@@ -441,6 +478,8 @@ class Omni6DSegmentation(data.Dataset):
 
 if __name__ == '__main__':
     import yaml
+    import os
+    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
     with open("configs/dinov2/OC/config.yaml", "r") as f:
         config_dict = yaml.safe_load(f)
     dataset = Omni6DSegmentation(Omni6dDataset=config_dict['Omni6dDataset'], augs=config_dict['augs'])

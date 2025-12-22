@@ -81,7 +81,6 @@ class EoMT(nn.Module):
         # Apply adapter to condition features
         cond_feats_adapted = self.cond_adapter(cond_feats)
         
-        # class_logits = self.class_head(q)
         attended_features, attn_weights = self.class_cross_attn(
             query=q,
             key=cond_feats_adapted,
