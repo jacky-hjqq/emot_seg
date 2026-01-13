@@ -2,11 +2,31 @@
 Omni6dDataset:
     data_root: '/media/tum/data2/Omni6DPose/SOPE'
     model_meta_root: '/media/tum/data2/Omni6DPose/Meta'
-    cond_root: 'prepared_cond'
+    cond_root: '/media/tum/data1/Experiment/data_cond/prepared_cond_omni6d'
+    condition_size: 224
+GSODataset:
+    data_root: '/media/tum/data2/GSO_data_unzip' 
+    cond_root: '/media/tum/data1/Experiment/data_cond/gso_render'
     condition_size: 224  
-YCBVDataset:
+ObjaverseDataset:
+    data_root: '/media/tum/data2/objaverse_data_unzip' 
+    cond_root: '/media/tum/data1/Experiment/data_cond/prepared_cond_objaverse'
+    condition_size: 224
+YCBV_Train_Dataset:
+    data_root: '/media/tum/data1/datasets/bop-dataset/ycbv/train_pbr'
+    cond_root: '/media/tum/data1/Experiment/data_cond/prepared_cond_ycbv'
+    condition_size: 224s
+YCBV_Test_Dataset:
     data_root: '/media/tum/data1/datasets/bop-dataset/ycbv/test'
     render_template_root: '/media/tum/data1/Omni6DPose/ycbv_templates'
+    condition_size: 224 
+LMO_Train_Dataset:
+    data_root: '/media/tum/data1/datasets/bop-dataset/lmo/train_pbr'
+    cond_root: '/media/tum/data1/Experiment/data_cond/prepared_cond_lmo'
+    condition_size: 224  
+LMO_Test_Dataset:
+    data_root: '/media/tum/data1/datasets/bop-dataset/lmo/test'
+    render_template_root: '/media/tum/data1/Omni6DPose/lmo_templates'
     condition_size: 224  
 # train augmentations
 augs:

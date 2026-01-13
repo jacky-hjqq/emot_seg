@@ -19,119 +19,119 @@ from datasets.utils.augmentation import (
 )
 from datasets.utils.vis_utils import *
 
-class Omni6DSegmentation(data.Dataset):
-    def __init__(self, Omni6dDataset, augs=None, scene_name=None, split="train"):
-        self.data_root = Omni6dDataset['data_root']
-        self.model_meta_root = Omni6dDataset['model_meta_root']
-        self.cond_root = Omni6dDataset['cond_root']
-        self.condition_size = Omni6dDataset.get('condition_size', 224)
+class GSOSegmentation(data.Dataset):
+    def __init__(self, GSODataset, augs=None):
+        self.data_root = GSODataset["data_root"]
+        self.cond_root = GSODataset["cond_root"]
+        self.condition_size = int(GSODataset["condition_size"]) 
         self.num_condition_imgs = 30
-        self.split = split
-
+        
         # --- Augmentation Settings ---
-        if self.split == 'train':
-            # Random crop settings
-            self.random_crop = augs['random_crop']
-            self.random_crop_ratio = augs['random_crop_ratio']
-            self.random_crop_scale = augs['random_crop_scale']
-            # Controls whether to apply identical color jittering
-            self.cojitter = augs['cojitter']
-            # Probability of using shared jitter vs. frame-specific jitter
-            self.cojitter_ratio = augs['cojitter_ratio']
-            # Initialize image augmentations (color jitter, grayscale, gaussian blur)
-            self.image_aug = get_image_augmentation(
-                color_jitter=augs['color_jitter'],
-                gray_scale=augs['gray_scale'],
-                gau_blur=augs['gau_blur'],
-            )
-            
-        if scene_name is None:
-            self.scene_name = ['ikea', 'scannet++'] ###########
-        else:
-            self.scene_name = [scene_name]
-            
-        model_meta_path = os.path.join(self.model_meta_root, 'obj_meta.json')
-        with open(model_meta_path, 'r') as f:
-            self.model_meta = json.load(f)
+        # Random crop settings
+        self.random_crop = augs['random_crop']
+        self.random_crop_ratio = augs['random_crop_ratio']
+        self.random_crop_scale = augs['random_crop_scale']
+        # Controls whether to apply identical color jittering
+        self.cojitter = augs['cojitter']
+        # Probability of using shared jitter vs. frame-specific jitter
+        self.cojitter_ratio = augs['cojitter_ratio']
+        # Initialize image augmentations (color jitter, grayscale, gaussian blur)
+        self.image_aug = get_image_augmentation(
+            color_jitter=augs['color_jitter'],
+            gray_scale=augs['gray_scale'],
+            gau_blur=augs['gau_blur'],
+        )
 
-        self.color_tpath = "{data_root}/{scene_patch}/{split}/{scene_name}/{scene_id:04d}/{frame_id:04d}_color.png"
-        self.mask_tpath = "{data_root}/{scene_patch}/{split}/{scene_name}/{scene_id:04d}/{frame_id:04d}_mask.exr"
-        self.meta_tpath = "{data_root}/{scene_patch}/{split}/{scene_name}/{scene_id:04d}/{frame_id:04d}_meta.json"
-
+        color_tpath = "{data_root}/{data_patch}/{scene_id}/{scene_name}/{render_name}/rgb/rgb_000000.png"
+        mask_tpath = "{data_root}/{data_patch}/{scene_id}/{scene_name}/{render_name}/instance_segmentation/instance_segmentation_000000.png"
+        instance_map_tpath = "{data_root}/{data_patch}/{scene_id}/{scene_name}/{render_name}/instance_segmentation/instance_segmentation_mapping_000000.json"
+        instance_semantic_map_tpath = "{data_root}/{data_patch}/{scene_id}/{scene_name}/{render_name}/instance_segmentation/instance_segmentation_semantics_mapping_000000.json"
+        
         self.total_data = []
         self.total_inst = []
-        self.annotation_labels = defaultdict(list)
-        self.annotation_objects = defaultdict(list)
-        self.obj_label_ids = []
+        self.obj_classes = []
+        self.annotation_classes = defaultdict(list)
+        self.annotation_objects= defaultdict(list)
         data_patches = sorted(os.listdir(os.path.join(self.data_root)))
-        # data_patches = data_patches[:5]
         for data_patch in data_patches:
-            data_patch_dir = os.path.join(self.data_root, data_patch)
-            for scene_name in self.scene_name:
-                scene_dir = os.path.join(data_patch_dir, self.split, scene_name)
-                if not os.path.exists(scene_dir):
-                    continue
-                scene_ids = sorted(os.listdir(scene_dir))
-                for scene_id in scene_ids:
-                    scene_dir = os.path.join(data_patch_dir, self.split, scene_name, scene_id)
-                    frames = sorted([f for f in os.listdir(scene_dir) if f.endswith('_color.png')])
-                    for frame in frames:
-                        frame_id = frame.split('_')[0]  # Assuming the frame name is like '0001_color.png'
-                        paths = self.get_frame_paths(data_patch, scene_name, scene_id, frame_id)
+            scene_ids = sorted(os.listdir(os.path.join(self.data_root, data_patch)))
+            for scene_id in scene_ids:
+                scene_names = sorted(os.listdir(os.path.join(self.data_root, data_patch, scene_id)))
+                for scene_name in scene_names:
+                    render_names = sorted(os.listdir(os.path.join(self.data_root, data_patch, scene_id, scene_name)))
+                    for render_name in render_names:
+                        paths = self.get_paths(
+                            data_root=self.data_root,
+                            data_patch=data_patch,
+                            scene_id=scene_id,
+                            scene_name=scene_name,
+                            render_name=render_name,
+                            color_tpath=color_tpath,
+                            mask_tpath=mask_tpath,
+                            instance_map_tpath=instance_map_tpath,
+                            instance_semantic_map_tpath=instance_semantic_map_tpath,
+                        )
                         if paths is None:
-                            continue # skip frames with missing files
-                        with open(paths["meta"], 'r') as f:
-                            meta_data = json.load(f)
+                            continue
+
+                        # load rgb and mask
+                        # # visualize instance
+                        # mask = cv2.imread(paths["mask"], cv2.IMREAD_UNCHANGED).astype(np.uint8)
+                        # mask_ids = np.unique(mask)
+                        # rgb = cv2.imread(paths["color"])[:,:,::-1]  # BGR to RGB
+                        # visualize_instance(rgb, mask, inst_id=4, save_path="instance_viz.png", alpha=0.5)
+
+                        # load instance map 
+                        with open(paths["instance_map"], "r") as f:
+                            instance_map = json.load(f)
+                        # load instance semantic map
+                        with open(paths["instance_semantic_map"], "r") as f:
+                            instance_semantic_map = json.load(f)
                         instance_info = []
-                        for obj_key in meta_data['objects']:
-                            obj_meta_data = meta_data['objects'][obj_key]
-                            # skip if it's transparent or specular 
-                            if 'transparent' in obj_meta_data["material"] or 'specular' in obj_meta_data["material"]:
+                        for key in instance_map:
+                            inst_value = instance_map[key]
+                            inst_value = inst_value.lower()
+                            # skip background and unlabeled
+                            if inst_value in ["background", "unlabelled"]:
                                 continue
-                            obj_id = obj_meta_data['meta']['oid']
-                            inst_id = int(obj_key.split('_', 1)[0])
-                            obj_label = obj_meta_data['meta']['class_name']
-                            obj_label_id = obj_meta_data['meta']['class_label']
-
-                            if obj_label_id not in self.obj_label_ids:
-                                self.obj_label_ids.append(obj_label_id)
-
-                            instance_info.append({
-                                "inst_id": inst_id,
-                                "obj_id": obj_id,
-                                "obj_label": obj_label,
-                                "obj_label_id": obj_label_id,
-                            })
-
+                            # skip if inst not object
+                            value_type = inst_value.split("/")[2]
+                            if value_type != "objects":
+                                continue
+                            obj_name = inst_value.split("/")[-3]
+                            obj_class = instance_semantic_map[key]['class'].lower()
+                            if obj_class not in self.obj_classes:
+                                self.obj_classes.append(obj_class)
                             data_idx = len(self.total_inst)
-                            self.total_inst.append({
-                                "data_idx": data_idx,
-                                "image_path": paths["color"],
-                                "mask_path": paths["mask"],
-                                "inst_id": inst_id,
-                                "obj_name": obj_id,
-                                "obj_label": obj_label,
-                                "obj_label_id": obj_label_id,
-                                })
-                            self.annotation_labels[obj_label_id].append({
-                                "data_idx": data_idx,
+                            instance_info.append({
+                                "obj_class": obj_class,
+                                "obj_name": obj_name,
+                                "inst_id": int(key),
                             })
-                            self.annotation_objects[obj_id].append({
-                                "data_idx": data_idx,
-                            })
+                            self.total_inst.append(
+                                {
+                                    "data_idx": data_idx,
+                                    "image_path": paths["color"],
+                                    "mask_path": paths["mask"],
+                                    "inst_id": int(key),
+                                    "obj_class": obj_class,
+                                    "obj_name": obj_name,
+                                }
+                            )
+                            self.annotation_classes[obj_class].append({"data_idx": data_idx})
+                            self.annotation_objects[obj_name].append({"data_idx": data_idx})
 
                         self.total_data.append({
-                            "image_path": paths["color"],
-                            "mask_path": paths["mask"],
-                            "instance_info": instance_info, 
-                            })
+                            "image_path": paths['color'],
+                            "mask_path": paths['mask'],
+                            "instance_info": instance_info,
+                        })
+
+            # break
 
         self.len_train = len(self.total_data)                 
-        logging.info(f"Omni6D Data size: {self.len_train}")
+        logging.info(f"GSO Data size: {self.len_train}")
     
-    def __len__(self):
-        return self.len_train
-
     def _collect_pos_conditions(self, instance_info, unique_inst_ids):
         """Collect available per-instance condition images.
 
@@ -139,38 +139,32 @@ class Omni6DSegmentation(data.Dataset):
             - 'inst_id', 'obj_id', 'obj_label_id', 'cond_img', 'cond_mask'
         Only includes instances whose `cond_root/<obj_id>` directory exists and
         where `get_cond_data` returned a valid pair.
-
-        Ensures at most one condition is returned per `obj_label_id`.
         """
         collected = []
-        seen_label_ids = set()
         shuffled_instance_info = list(instance_info)
         random.shuffle(shuffled_instance_info)
         for inst in shuffled_instance_info:
             if inst['inst_id'] not in unique_inst_ids:
                 continue
 
-            obj_label_id = inst['obj_label_id']
-            # if obj_label_id in seen_label_ids:
-            #     continue
-
-            obj_id = inst['obj_id']
-            obj_dir = os.path.join(self.cond_root, str(obj_id))
+            obj_name = inst['obj_name']
+            obj_dir = os.path.join(self.cond_root, str(obj_name))
             if not os.path.exists(obj_dir):
                 continue
-            cond_img, cond_mask = self.get_cond_data(obj_id)
+            cond_img, cond_mask = self.get_cond_data(obj_name)
             if cond_img is None:
                 continue
             collected.append({
                 'inst_id': inst['inst_id'],
-                'obj_id': obj_id,
-                'obj_label_id': obj_label_id,
+                'obj_class': inst['obj_class'],
+                'obj_name': obj_name,
                 'cond_img': cond_img,
                 'cond_mask': cond_mask,
             })
-
-            seen_label_ids.add(obj_label_id)
         return collected
+        
+    def __len__(self):
+        return self.len_train
 
     def __getitem__(self, index):
         load_data = self.total_data[index]
@@ -180,10 +174,10 @@ class Omni6DSegmentation(data.Dataset):
 
         # load image and mask
         img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
-        mask = (cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)[:, :, 2] * 255).astype(np.uint8)
+        mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED).astype(np.uint8)
 
         # random crop the image and mask (augmentation)
-        if self.split == 'train' and self.random_crop and random.random() < self.random_crop_ratio:
+        if self.random_crop and random.random() < self.random_crop_ratio:
             crop_scale = random.uniform(self.random_crop_scale[0], self.random_crop_scale[1])
             img, mask = random_scaled_crop(img, mask, crop_scale=crop_scale)
         
@@ -212,16 +206,16 @@ class Omni6DSegmentation(data.Dataset):
         num_primary = len(cond_imgs)
         num_non_im_needed = max(0, self.num_condition_imgs - num_primary)
 
-        # choose candidate labels excluding those already represented by primary collected
-        labels_id_im = set(p['obj_label_id'] for p in primary)
-        candidate_labels = list(set(self.obj_label_ids) - labels_id_im)
-        random.shuffle(candidate_labels)
-        labels_id_non_im = candidate_labels[:num_non_im_needed] if num_non_im_needed > 0 else []
+        # choose candidate classes excluding those already represented by primary collected
+        classes_im = set(p['obj_class'] for p in primary)
+        candidate_classes = list(set(self.obj_classes) - classes_im)
+        random.shuffle(candidate_classes)
+        classes_non_im = candidate_classes[:num_non_im_needed] if num_non_im_needed > 0 else []
 
         # sample one cond per selected label (best-effort with retries)
-        for obj_label_id in labels_id_non_im:
+        for obj_class in classes_non_im:
             while True:
-                cond_idx = random.choice(self.annotation_labels[obj_label_id])
+                cond_idx = random.choice(self.annotation_classes[obj_class])
                 cond_data = self.total_inst[cond_idx['data_idx']]
                 obj_id = cond_data['obj_name']
                 obj_dir = os.path.join(self.cond_root, str(obj_id))
@@ -260,14 +254,10 @@ class Omni6DSegmentation(data.Dataset):
         cond_mask_ids -= 1 # shift with -1
 
         # transform (image augmentation and mask transform)
-        if self.split == 'train':
-            img = Image.fromarray(img)
-            mask = Image.fromarray(mask)
-            mask_all = Image.fromarray(mask_all)
-            img, mask, mask_all = self._img_augmentation(img, mask, mask_all)
-        else:
-            mask = self._mask_transform(mask)
-            mask_all = self._mask_transform(mask_all)  
+        img = Image.fromarray(img)
+        mask = Image.fromarray(mask)
+        mask_all = Image.fromarray(mask_all)
+        img, mask, mask_all = self._img_augmentation(img, mask, mask_all)
 
         # check if mask and cond_mask_ids match (only positive samples should be in mask)
         positive_cond_ids = cond_mask_ids[cond_mask_ids >= 0]
@@ -314,69 +304,120 @@ class Omni6DSegmentation(data.Dataset):
             "cond_masks": cond_masks,
         }
         return batch_data
-    
-    def get_frame_paths(self, scene_patch: str, scene_name: str, scene_id: int, frame_id: int) -> dict:
-        """
-        Returns a dict with file paths for color, depth, mask, and meta
-        for the given scene_patch, scene_id, and frame_id.
-        """
+
+    def get_paths(
+        self,
+        data_root: str,
+        data_patch: str,
+        scene_id: str,
+        scene_name: str,
+        render_name: str,
+        color_tpath: str,
+        mask_tpath: str,
+        instance_map_tpath: str,
+        instance_semantic_map_tpath: str,   
+    ) -> dict | None:
         params = {
-            "data_root":   self.data_root,
-            "scene_patch": scene_patch,
-            "split":       self.split,
-            "scene_name":  scene_name,
-            "scene_id":    int(scene_id),
-            "frame_id":    int(frame_id),
+            "data_root": data_root,
+            "data_patch": data_patch,
+            "scene_id": scene_id,
+            "scene_name": scene_name,
+            "render_name": render_name,
         }
-
         paths = {
-            "color": self.color_tpath.format(**params),
-            "mask":  self.mask_tpath.format(**params),
-            "meta":  self.meta_tpath.format(**params),
+            "color": color_tpath.format(**params),
+            "mask": mask_tpath.format(**params),
+            "instance_map": instance_map_tpath.format(**params),
+            "instance_semantic_map": instance_semantic_map_tpath.format(**params),
         }
-
-        # check that every file exists
         if not all(os.path.exists(p) for p in paths.values()):
             return None
-
         return paths
-    
-    def get_cond_data(self, obj_id):
-        """Load a condition image/mask pair for the given ``obj_id``.
 
-        - Prefer precomputed condition images under ``self.cond_root/<obj_id>/`` with files
-          named ``<stem>_image.png`` and ``<stem>_mask.png`` (randomly choose one).
-        - If no precomputed files are available, randomly sample one annotation instance from
-          ``self.annotation_objects[obj_id]`` and extract the instance mask from that frame.
-        Returns ``(cond_img, cond_mask)`` or ``(None, None)`` if no valid source exists.
+    
+    def get_cond_data(self, obj_name):
+        """Load a condition image/mask pair for the given ``obj_name``.
+        - Prefers: rgb_<id>.png and mask_<id>.png
         """
-        obj_dir = os.path.join(self.cond_root, str(obj_id))
-        # find all candidate image files that follow the naming convention
-        img_files = [f for f in os.listdir(obj_dir) if f.endswith('_image.png')]
+        obj_dir = os.path.join(self.cond_root, str(obj_name))
+        
+        # Check if directory exists to avoid os.listdir errors
+        if not os.path.isdir(obj_dir):
+            print(f"Directory {obj_dir} does not exist.")
+            return None, None
+
+        # Find all files starting with 'rgb_'
+        img_files = [f for f in os.listdir(obj_dir) if f.startswith('rgb_') and f.endswith('.png')]
+
         if len(img_files) > 0:
             img_file = random.choice(img_files)
-            stem = img_file[:-len('_image.png')]
+            
+            # Extract the unique ID/suffix by removing 'rgb_' 
+            # Example: 'rgb_001.png' -> '001.png'
+            suffix = img_file[len('rgb_'):]
+            mask_file = 'mask_' + suffix
+            
             img_path = os.path.join(obj_dir, img_file)
-            mask_path = os.path.join(obj_dir, stem + '_mask.png')
+            mask_path = os.path.join(obj_dir, mask_file)
+
             if os.path.exists(img_path) and os.path.exists(mask_path):
-                cond_img = cv2.imread(img_path)[:, :, ::-1]
+                cond_img = cv2.imread(img_path)[:, :, ::-1] # BGR to RGB
                 cond_mask_raw = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
-                # support single-channel or multi-channel masks
+
                 if cond_mask_raw is not None:
+                    # Support single-channel or multi-channel masks
                     if cond_mask_raw.ndim == 3:
                         cond_mask = cond_mask_raw[:, :, 0]
                     else:
                         cond_mask = cond_mask_raw
-                    # augmentation
-                    if self.split == 'train':
-                        cond_img, cond_mask = self._cond_img_augmentation(cond_img, cond_mask)
-                    # binarize: consider non-zero as foreground and accept as-is
+                    
+                    # Augmentation
+                    cond_img, cond_mask = self._cond_img_augmentation(cond_img, cond_mask)
+                    
+                    # Binarize and mask the image
                     cond_mask = (cond_mask != 0).astype(np.uint8) * 255
                     cond_img = cond_img * cond_mask[:, :, None].astype(bool)
+                    
                     return cond_img, cond_mask
-        else:
-            print(f"No precomputed cond images for obj {obj_id}, sampling from dataset.")
-            return None, None
+        
+        print(f"No valid precomputed pairs for {obj_name} (Expected rgb_*.png and mask_*.png)")
+        return None, None
+    
+    # def get_cond_data(self, obj_name):
+    #     """Load a condition image/mask pair for the given ``obj_name``.
+
+    #     - Prefer precomputed condition images under ``self.cond_root/<obj_name>/`` with files
+    #       named ``<stem>_image.png`` and ``<stem>_mask.png`` (randomly choose one).
+    #     - If no precomputed files are available, randomly sample one annotation instance from
+    #       ``self.annotation_objects[obj_id]`` and extract the instance mask from that frame.
+    #     Returns ``(cond_img, cond_mask)`` or ``(None, None)`` if no valid source exists.
+    #     """
+    #     obj_dir = os.path.join(self.cond_root, str(obj_name))
+    #     # find all candidate image files that follow the naming convention
+    #     img_files = [f for f in os.listdir(obj_dir) if f.endswith('_image.png')]
+    #     if len(img_files) > 0:
+    #         img_file = random.choice(img_files)
+    #         stem = img_file[:-len('_image.png')]
+    #         img_path = os.path.join(obj_dir, img_file)
+    #         mask_path = os.path.join(obj_dir, stem + '_mask.png')
+    #         if os.path.exists(img_path) and os.path.exists(mask_path):
+    #             cond_img = cv2.imread(img_path)[:, :, ::-1]
+    #             cond_mask_raw = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+    #             # support single-channel or multi-channel masks
+    #             if cond_mask_raw is not None:
+    #                 if cond_mask_raw.ndim == 3:
+    #                     cond_mask = cond_mask_raw[:, :, 0]
+    #                 else:
+    #                     cond_mask = cond_mask_raw
+    #                 # augmentation
+    #                 cond_img, cond_mask = self._cond_img_augmentation(cond_img, cond_mask)
+    #                 # binarize: consider non-zero as foreground and accept as-is
+    #                 cond_mask = (cond_mask != 0).astype(np.uint8) * 255
+    #                 cond_img = cond_img * cond_mask[:, :, None].astype(bool)
+    #                 return cond_img, cond_mask
+    #     else:
+    #         print(f"No precomputed cond images for obj {obj_name}, sampling from dataset.")
+    #         return None, None
     
     def _img_augmentation(self, img, mask, mask_all):
         # Kept for backward compatibility with older code paths.
@@ -495,7 +536,7 @@ if __name__ == '__main__':
     os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
     with open("configs/dinov2/OC/config.yaml", "r") as f:
         config_dict = yaml.safe_load(f)
-    dataset = Omni6DSegmentation(Omni6dDataset=config_dict['Omni6dDataset'], augs=config_dict['augs'])
+    dataset = GSOSegmentation(GSODataset=config_dict['GSODataset'], augs=config_dict['augs'])
     print(len(dataset))
     for i in range(20):
         dataset[i]

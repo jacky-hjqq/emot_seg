@@ -14,6 +14,7 @@ import math
 
 from models.scale_block import ScaleBlock
 import numpy as np
+from models.transformer import DetrTransformerDecoder
 
 
 class EoMT(nn.Module):
@@ -24,6 +25,7 @@ class EoMT(nn.Module):
         num_q,
         num_blocks=4,
         masked_attn_enabled=True,
+        temperature_learnable=False,
     ):
         super().__init__()
         self.encoder = encoder
@@ -39,24 +41,44 @@ class EoMT(nn.Module):
         self.register_buffer("attn_mask_probs", torch.ones(num_blocks))
 
         self.q = nn.Embedding(num_q, self.encoder.backbone.embed_dim)
-        
-        # Adapter to project cond_encoder features to encoder embedding dimension
+
         input_dim = self.cond_encoder.backbone.embed_dim
         output_dim = self.encoder.backbone.embed_dim
-        self.cond_adapter = Adapter(
-            in_features=input_dim,
-            out_features=output_dim,
-            reduction=4,  # Standard reduction factor
-            ratio=0.2     # Standard residual ratio (alpha)
+
+        # Adapter to query features
+        # self.query_adapter = Adapter(
+        #     in_features=input_dim,
+        #     out_features=output_dim,
+        #     reduction=4,  # Standard reduction factor
+        #     ratio=0.6     # Standard residual ratio (alpha)
+        # )
+        self.query_adapter = nn.Sequential(
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
+        )
+
+        # Adapter to project cond_encoder features to encoder embedding dimension
+        # self.cond_adapter = Adapter(
+        #     in_features=input_dim,
+        #     out_features=output_dim,
+        #     reduction=4,  # Standard reduction factor
+        #     ratio=0.6     # Standard residual ratio (alpha)
+        # )
+        self.cond_adapter = nn.Sequential(
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.encoder.backbone.embed_dim, self.encoder.backbone.embed_dim),
         )
         # ---------------------------------------
-        self.class_cross_attn = nn.MultiheadAttention(
-            embed_dim=self.encoder.backbone.embed_dim,
-            num_heads=8,
-            batch_first=True
-        )
-        # Optional: learnable temperature for scaling logits
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        if temperature_learnable:
+            self.temperature = nn.Parameter(torch.ones(1) * 0.07)
+        else:
+            self.temperature = 0.07
         # ---------------------------------------
 
         self.mask_head = nn.Sequential(
@@ -78,18 +100,24 @@ class EoMT(nn.Module):
     def _predict(self, x: torch.Tensor, cond_feats: torch.Tensor):
         q = x[:, : self.num_q, :]
 
-        # Apply adapter to condition features
-        cond_feats_adapted = self.cond_adapter(cond_feats)
-        
-        attended_features, attn_weights = self.class_cross_attn(
-            query=q,
-            key=cond_feats_adapted,
-            value=cond_feats_adapted,
-            need_weights=True,
-            average_attn_weights=True
+        # Predict masks
+        x = x[:, self.num_q + self.encoder.backbone.num_prefix_tokens :, :]
+        x = x.transpose(1, 2).reshape(
+            x.shape[0], -1, *self.encoder.backbone.patch_embed.grid_size
         )
-        # Scale the logits (learnable temperature)
-        class_logits = attn_weights * self.logit_scale.exp()
+
+        mask_feats = self.mask_head(q)
+
+        mask_logits = torch.einsum(
+            "bqc, bchw -> bqhw", mask_feats, self.upscale(x)
+        )
+
+        # Predict classes
+        class_feats = self.query_adapter(q)
+        cond_feats_adapted = self.cond_adapter(cond_feats)
+        class_logits = (
+            F.cosine_similarity(class_feats.unsqueeze(2), cond_feats_adapted.unsqueeze(1), dim=-1) / self.temperature
+        )
         
         # Add "no object" class
         no_object_logits = torch.zeros(
@@ -99,16 +127,6 @@ class EoMT(nn.Module):
             device=class_logits.device
         )
         class_logits = torch.cat([class_logits, no_object_logits], dim=-1)
-        # Keep batch dimension; callers may unbind() if they need a list per sample.
-
-        x = x[:, self.num_q + self.encoder.backbone.num_prefix_tokens :, :]
-        x = x.transpose(1, 2).reshape(
-            x.shape[0], -1, *self.encoder.backbone.patch_embed.grid_size
-        )
-
-        mask_logits = torch.einsum(
-            "bqc, bchw -> bqhw", self.mask_head(q), self.upscale(x)
-        )
 
         return mask_logits, class_logits
 
@@ -192,10 +210,8 @@ class EoMT(nn.Module):
         return attn_mask
 
     def forward(self, x: torch.Tensor, bs_cond_x: torch.Tensor = None, bs_cond_masks: torch.Tensor = None):
-        # Extract condition features from all layers for each sample in the batch
+        # Extract condition features for each sample in the batch
         if bs_cond_x is not None:
-            # NOTE: the dataloader stacks `bs_cond_x`/`bs_cond_masks`, so num_cond is fixed within batch.
-            # Vectorize cond encoding by flattening (B, N, ...) -> (B*N, ...).
             batch_size, num_cond = bs_cond_x.shape[:2]
             cond_x = (bs_cond_x - self.cond_encoder.pixel_mean) / self.cond_encoder.pixel_std
 
@@ -283,7 +299,7 @@ class EoMT(nn.Module):
             mask_logits_per_layer,
             class_logits_per_layer,
         )
-    
+
     def encode_cond_x_multilayer(self, cond_x: torch.Tensor, cond_masks: torch.Tensor = None):
         """
         Extract features from multiple layers for condition images.
@@ -348,6 +364,9 @@ class EoMT(nn.Module):
                     # Standard Global Average Pooling (skip prefix tokens)
                     patch_tokens = normed[:, num_prefix_tokens:, :]
                     features = patch_tokens.mean(dim=1)  # (num_cond, embed_dim)
+
+                # use the cls token feature
+                # features = normed[:, 0, :]  # (num_cond, embed_dim)
                 
                 cond_features_per_layer.append(features)
         
@@ -362,6 +381,8 @@ class EoMT(nn.Module):
         else:
             patch_tokens = normed[:, num_prefix_tokens:, :]
             features = patch_tokens.mean(dim=1)
+
+        # features = normed[:, 0, :]  # (num_cond, embed_dim)
             
         cond_features_per_layer.append(features)
         
@@ -391,7 +412,8 @@ class Adapter(nn.Module):
             nn.Linear(out_features, hidden_dim, bias=False),
             nn.GELU(),
             nn.Linear(hidden_dim, out_features, bias=False),
-            nn.GELU()
+            nn.GELU(),
+            nn.LayerNorm(out_features),
         )
 
     def forward(self, x):

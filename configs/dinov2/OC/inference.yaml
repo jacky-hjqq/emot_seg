@@ -5,7 +5,7 @@ model:
   init_args:
     train_vis_interval: 20
     val_vis_interval: 20
-    mask_thresh: 0.1
+    mask_thresh: 0.5
     overlap_thresh: 0.8
     attn_mask_annealing_enabled: False
     attn_mask_annealing_start_steps: [14782, 29564, 44346, 59128]

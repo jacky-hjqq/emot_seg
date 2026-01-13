@@ -1,12 +1,12 @@
-import torch.utils.data as data
 import os
 import json
 import logging
-import torch
 import numpy as np
 import cv2
-import glob
 from PIL import Image
+import glob
+import torch
+import torch.utils.data as data
 from collections import defaultdict
 import random
 import sys
@@ -16,16 +16,15 @@ from datasets.utils.augmentation import (
     random_rotation,
     random_scaled_crop
 )
-from datasets.utils.img_utils import get_mask, crop_and_resize
+from datasets.utils.img_utils import crop_and_resize, get_mask
 from datasets.utils.vis_utils import *
 
-
-class YCBV_Train_Segmentation(data.Dataset):
-    def __init__(self, YCBVDataset, augs=None):
-        self.data_root = YCBVDataset["data_root"]
-        self.cond_root = YCBVDataset['cond_root']
-        self.condition_size = YCBVDataset["condition_size"]
-        self.obj_ids = list(range(1, 22))
+class LMO_Train_Segmentation(data.Dataset):
+    def __init__(self, LMODataset, augs=None):
+        self.data_root = LMODataset["data_root"]
+        self.cond_root = LMODataset['cond_root']
+        self.condition_size = LMODataset["condition_size"]
+        self.obj_ids = list(range(1, 16))
 
         # --- Augmentation Settings ---
         # Random crop settings
@@ -248,7 +247,7 @@ class YCBV_Train_Segmentation(data.Dataset):
         targets_all = self.generate_targets(mask_all, bg_val=-1)
         targets["masks_all"] = targets_all["masks"]
 
-        # Visualzation
+        # # Visualzation
         # vis = visualize_targets_and_templates(img, targets, cond_imgs)
         # # vis = visualize_image_mask_and_templates(img, semantic_mask, cond_imgs)
         # os.makedirs("test", exist_ok=True)
@@ -357,15 +356,14 @@ class YCBV_Train_Segmentation(data.Dataset):
 
         return targets
 
-  
-
-class YCBV_Test_Segmentation(data.Dataset):
-    def __init__(self, YCBVDataset):
-        self.data_root = YCBVDataset["data_root"]
-        self.render_template_root = YCBVDataset["render_template_root"]
-        self.condition_size = YCBVDataset["condition_size"]
-
-        self.obj_ids = list(range(1, 22))
+   
+class LMO_Test_Segmentation(data.Dataset):
+    def __init__(self, LMODataset):
+        self.data_root = LMODataset["data_root"]
+        self.render_template_root = LMODataset["render_template_root"]
+        self.condition_size = LMODataset["condition_size"]
+        self.obj_ids = [1,5,6,8,9,10,11,12]
+        
         self.total_data = []
         self.annotation = defaultdict(list)
         scenes = sorted(os.listdir(os.path.join(self.data_root)))
@@ -395,7 +393,7 @@ class YCBV_Test_Segmentation(data.Dataset):
                     })
 
         self.len_val = len(self.total_data)                 
-        logging.info(f"YCBV Data size: {self.len_val}")
+        logging.info(f"LMO Data size: {self.len_val}")
 
     def __getitem__(self, index):
         load_data = self.total_data[index]
@@ -422,7 +420,7 @@ class YCBV_Test_Segmentation(data.Dataset):
             cond_img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
             cond_mask = get_mask(cond_img)
             # resize and crop the condition image
-            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0.2)
+            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_imgs_path.append(image_path)
@@ -437,7 +435,7 @@ class YCBV_Test_Segmentation(data.Dataset):
             cond_img = cv2.imread(image_path)[:,:,::-1]  # BGR to RGB
             cond_mask = get_mask(cond_img)
             # resize and crop the condition image
-            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0.2)
+            cond_img, cond_mask = crop_and_resize(cond_img, cond_mask, size=self.condition_size, crop_rel_pad=0)
             cond_imgs.append(cond_img)
             cond_masks.append(cond_mask)
             cond_imgs_path.append(image_path)
@@ -545,13 +543,14 @@ class YCBV_Test_Segmentation(data.Dataset):
         }
 
         return targets
+
     
 if __name__ == '__main__':
     import yaml
     with open("configs/dinov2/OC/config.yaml", "r") as f:
         config_dict = yaml.safe_load(f)
-    # dataset = YCBV_Train_Segmentation(YCBVDataset=config_dict['YCBV_Train_Dataset'], augs=config_dict['augs'])
-    dataset =YCBV_Test_Segmentation(YCBVDataset=config_dict['YCBV_Test_Dataset'])
+    # dataset = LMO_Train_Segmentation(LMODataset=config_dict['LMO_Train_Dataset'], augs=config_dict['augs'])
+    dataset = LMO_Test_Segmentation(LMODataset=config_dict['LMO_Test_Dataset'])
     print(len(dataset))
     for i in range(20):
         dataset[i]

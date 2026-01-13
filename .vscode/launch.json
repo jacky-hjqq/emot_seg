@@ -62,5 +62,71 @@
                 "CUDA_VISIBLE_DEVICES": "0,1"
             },
         },
+        {
+            "name": "LMO Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "fit",
+                "-c", "configs/dinov2/OC/lmo_train.yaml",
+                "--trainer.devices", "2", 
+                "--trainer.accumulate_grad_batches", "4",
+                // "--trainer.num_sanity_val_steps", "0",
+                // "--trainer.logger", "false",
+                "--data.batch_size", "2",
+                "--data.path", "OC"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1"
+            },
+        },
+        {
+            "name": "YCBV Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "fit",
+                "-c", "configs/dinov2/OC/ycbv_train.yaml",
+                "--trainer.devices", "2", 
+                "--trainer.accumulate_grad_batches", "8",
+                // "--trainer.num_sanity_val_steps", "0",
+                "--trainer.logger", "false",
+                "--data.batch_size", "2",
+                "--data.path", "OC"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1"
+            },
+        },
+        {
+            "name": "GSO Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "fit",
+                "-c", "configs/dinov2/OC/gso_train.yaml",
+                "--trainer.devices", "2", 
+                "--trainer.accumulate_grad_batches", "4",
+                // "--trainer.num_sanity_val_steps", "0",
+                // "--trainer.logger", "false",
+                "--data.batch_size", "2",
+                "--data.path", "OC"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1"
+            },
+        },
     ]
 }

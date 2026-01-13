@@ -1,0 +1,26 @@
+trainer:
+  max_epochs: 5
+  limit_train_batches: 8000 # steps_per_epoch = limit_train_batches / accumulate_grad_batches 
+model:
+  class_path: training.mask_classification_panoptic.MaskClassificationPanoptic
+  init_args:
+    train_vis_interval: 50
+    val_vis_interval: 10
+    attn_mask_annealing_enabled: False # True
+    attn_mask_annealing_start_steps: [16000, 32000, 48000, 64000] # [2epochs, 4epochs, 6epochs, 8epochs]
+    attn_mask_annealing_end_steps: [32000, 48000, 64000, 80000] # [4epochs, 6epochs, 8epochs, 10epochs]
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 200
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            img_size: [480, 640]
+        cond_encoder:
+          class_path: models.vit.ViT
+          init_args:
+            img_size: [224, 224]
+data:
+  class_path: datasets.train_lmo_dataset.train_lmo_dataset
+  

@@ -454,7 +454,11 @@ class LightningModule(lightning.LightningModule):
         """
         # 1. Get scores and classes
         # Dynamic: The number of classes depends on the input shape
-        scores, classes = class_logits.softmax(dim=-1).max(-1)
+        probs = class_logits.softmax(dim=-1)
+        topk = min(2, probs.shape[-1])
+        scores_k, classes_k = probs.topk(k=topk, dim=-1)  # (Q, K)
+        scores = scores_k.reshape(-1)  # (Q*K,)
+        classes = classes_k.reshape(-1)  # (Q*K,)
         
         # Dynamically determine the "No Object" class index
         # Usually the last dimension of logits contains the N classes + 1 void class
@@ -482,6 +486,8 @@ class LightningModule(lightning.LightningModule):
 
         # 3. Pixel-wise Competition
         masks = mask_logits.sigmoid()
+        if topk > 1:
+            masks = masks.repeat_interleave(topk, dim=0)  # (Q*K, H, W)
         mask_ids = (scores[keep][..., None, None] * masks[keep]).argmax(0)
         
         segments = -torch.ones(

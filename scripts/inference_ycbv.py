@@ -9,7 +9,9 @@ import importlib
 import numpy as np  
 import torch.nn.functional as F
 from lightning import seed_everything
-from datasets.ycbv_dataset import YCBVSegmentation
+import sys
+sys.path.append(".")
+from datasets.ycbv_dataset import YCBV_Test_Segmentation
 from datasets.utils.vis_utils import visualize_image_mask_and_templates, visualize_instance_mask
 
 def mask_to_rle_fast(binary_mask: np.ndarray):
@@ -46,7 +48,7 @@ dataset_name = "ycbv"
 seed_everything(0, verbose=False)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 img_size = (480, 640)
-state_dict_path = '/media/tum/data2/epoch=9-step=80000.ckpt'
+state_dict_path = 'eomt_seg/qf85a5us/checkpoints/epoch=9-step=50000.ckpt'
 config_path = "configs/dinov2/OC/inference.yaml" 
 with open(config_path, "r") as f:
     config = yaml.safe_load(f)
@@ -97,8 +99,8 @@ model.load_state_dict(state_dict, strict=False)
 config_path = "configs/dinov2/OC/config.yaml"
 with open(config_path, 'r') as f:
     data_config = yaml.safe_load(f)
-ycbv_config = data_config['YCBVDataset']
-dataset = YCBVSegmentation(ycbv_config)
+ycbv_config = data_config['YCBV_Test_Dataset']
+dataset = YCBV_Test_Segmentation(ycbv_config)
 
 # Inference
 seg_res = []
